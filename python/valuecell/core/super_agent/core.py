@@ -60,12 +60,13 @@ class SuperAgent:
                 with_model
             )
 
+            instructions = model_utils_mod.ensure_json_hint([SUPER_AGENT_INSTRUCTION])
             return Agent(
                 model=with_model,
                 parser_model=with_model,
                 markdown=False,
                 debug_mode=agent_debug_mode_enabled(),
-                instructions=[SUPER_AGENT_INSTRUCTION],
+                instructions=instructions,
                 # expected_output=SUPER_AGENT_EXPECTED_OUTPUT,
                 output_schema=SuperAgentOutcome,
                 use_json_mode=model_utils_mod.model_should_use_json_mode(with_model),

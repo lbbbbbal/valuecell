@@ -100,6 +100,7 @@ class ExecutionPlanner:
         try:
             # Fetch model via utils module reference so tests can monkeypatch it reliably
             model = model_utils_mod.get_model_for_agent("super_agent")
+            instructions = model_utils_mod.ensure_json_hint([PLANNER_INSTRUCTION])
             self.agent = Agent(
                 model=model,
                 tools=[
@@ -109,7 +110,7 @@ class ExecutionPlanner:
                     self.tool_get_enabled_agents,
                 ],
                 debug_mode=agent_debug_mode_enabled(),
-                instructions=[PLANNER_INSTRUCTION],
+                instructions=instructions,
                 # output format
                 markdown=False,
                 output_schema=PlannerResponse,
@@ -287,6 +288,7 @@ class ExecutionPlanner:
                 "Planner selected unsupported agent(s):"
                 f" {invalid_list}."
                 f" Maybe the chosen model `{model_description}` hallucinated."
+                f" Available agents: {available_agents}."
             )
             logger.warning(
                 "Planner proposed unsupported agents: %s (available: %s)",

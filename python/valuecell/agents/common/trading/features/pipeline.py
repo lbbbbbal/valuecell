@@ -49,10 +49,7 @@ class DefaultFeaturesPipeline(BaseFeaturesPipeline):
         self._symbols = list(dict.fromkeys(request.trading_config.symbols))
         self._market_snapshot_computer = market_snapshot_computer
         self._candle_configurations = candle_configurations
-        self._candle_configurations = candle_configurations or [
-            CandleConfig(interval="1s", lookback=60 * 3),
-            CandleConfig(interval="1m", lookback=60 * 4),
-        ]
+        self._candle_configurations = candle_configurations or self._build_default_candle_configs()
 
     async def build(self) -> FeaturesPipelineResult:
         """
@@ -115,3 +112,19 @@ class DefaultFeaturesPipeline(BaseFeaturesPipeline):
             candle_feature_computer=candle_feature_computer,
             market_snapshot_computer=market_snapshot_computer,
         )
+
+    def _build_default_candle_configs(self) -> list[CandleConfig]:
+        """Return default candle intervals, adapting to exchange support.
+
+        OKX does not offer 1-second OHLC candles, so fall back to 1-minute
+        candles only for that exchange. Other exchanges keep the original
+        1s + 1m pair to retain higher-frequency features.
+        """
+
+        if self._request.exchange_config.exchange_id.lower() == "okx":
+            return [CandleConfig(interval="1m", lookback=60 * 4)]
+
+        return [
+            CandleConfig(interval="1s", lookback=60 * 3),
+            CandleConfig(interval="1m", lookback=60 * 4),
+        ]

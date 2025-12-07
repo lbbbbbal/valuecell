@@ -41,9 +41,13 @@ class ResearchAgent(BaseAgent):
         ]
         # Lazily obtain knowledge; disable search if unavailable
         knowledge = get_knowledge()
+        model = model_utils_mod.get_model_for_agent("research_agent")
+        instructions = model_utils_mod.ensure_json_hint([KNOWLEDGE_AGENT_INSTRUCTION])
+        use_json_mode = model_utils_mod.model_should_use_json_mode(model)
+
         self.knowledge_research_agent = Agent(
-            model=model_utils_mod.get_model_for_agent("research_agent"),
-            instructions=[KNOWLEDGE_AGENT_INSTRUCTION],
+            model=model,
+            instructions=instructions,
             expected_output=KNOWLEDGE_AGENT_EXPECTED_OUTPUT,
             tools=tools,
             knowledge=knowledge,
@@ -54,9 +58,10 @@ class ResearchAgent(BaseAgent):
             add_history_to_context=True,
             num_history_runs=3,
             read_chat_history=True,
-            enable_session_summaries=True,
+            enable_session_summaries=not use_json_mode,
             # configuration
             debug_mode=agent_debug_mode_enabled(),
+            use_json_mode=use_json_mode,
         )
         # Configure EDGAR identity only when SEC_EMAIL is present
         sec_email = os.getenv("SEC_EMAIL")

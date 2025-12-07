@@ -5,11 +5,11 @@ Unit tests for valuecell.core.agent.decorator module
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from a2a.server.events import EventQueue
-from a2a.types import AgentCapabilities, AgentCard
+from a2a.types import AgentCapabilities, AgentCard, TaskState
 from valuecell.core.agent.decorator import (
     GenericAgentExecutor,
     _create_agent_executor,
@@ -62,6 +62,37 @@ class MockToolCallAgent(BaseAgent):
                 "tool_result": "Tool result data",
             },
         )
+
+
+class MockSingleResponseAgent(BaseAgent):
+    """Mock agent that returns a single response instance."""
+
+    def __init__(self):
+        self.stream_called = False
+
+    async def stream(self, query, context_id, task_id, dependencies):
+        self.stream_called = True
+        return StreamResponse(
+            event=StreamResponseEvent.MESSAGE_CHUNK, content="single response"
+        )
+
+
+class MockIterableAgent(BaseAgent):
+    """Mock agent that returns a sync iterable of responses."""
+
+    def __init__(self):
+        self.stream_called = False
+
+    async def stream(self, query, context_id, task_id, dependencies):
+        self.stream_called = True
+        return [
+            StreamResponse(
+                event=StreamResponseEvent.MESSAGE_CHUNK, content="first chunk"
+            ),
+            StreamResponse(
+                event=StreamResponseEvent.MESSAGE_CHUNK, content="second chunk"
+            ),
+        ]
 
 
 class TestGenericAgentExecutor:
@@ -176,6 +207,69 @@ class TestGenericAgentExecutor:
             assert not agent.stream_called
 
     @pytest.mark.asyncio
+    async def test_execute_accepts_single_response(self):
+        """Agent returning single response should be normalized to async iterable."""
+
+        agent = MockSingleResponseAgent()
+        executor = GenericAgentExecutor(agent)
+
+        context = MagicMock()
+        context.get_user_input.return_value = "test query"
+        context.current_task = MagicMock()
+        context.current_task.id = "task-123"
+        context.current_task.context_id = "context-456"
+        context.metadata = {}
+        context.message = MagicMock()
+        context.message.metadata = {}
+
+        event_queue = MagicMock(spec=EventQueue)
+        event_queue.enqueue_event = AsyncMock()
+
+        with patch("valuecell.core.agent.decorator.TaskUpdater") as mock_updater_class:
+            mock_updater = MagicMock()
+            mock_updater.update_status = AsyncMock()
+            mock_updater.complete = AsyncMock()
+            mock_updater_class.return_value = mock_updater
+
+            await executor.execute(context, event_queue)
+
+            assert agent.stream_called is True
+            mock_updater.update_status.assert_called()
+            mock_updater.complete.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_execute_accepts_sync_iterable(self):
+        """Agent returning sync iterable should stream all responses."""
+
+        agent = MockIterableAgent()
+        executor = GenericAgentExecutor(agent)
+
+        context = MagicMock()
+        context.get_user_input.return_value = "test query"
+        context.current_task = MagicMock()
+        context.current_task.id = "task-123"
+        context.current_task.context_id = "context-456"
+        context.metadata = {}
+        context.message = MagicMock()
+        context.message.metadata = {}
+
+        event_queue = MagicMock(spec=EventQueue)
+        event_queue.enqueue_event = AsyncMock()
+
+        with patch("valuecell.core.agent.decorator.TaskUpdater") as mock_updater_class:
+            mock_updater = MagicMock()
+            mock_updater.update_status = AsyncMock()
+            mock_updater.complete = AsyncMock()
+            mock_updater_class.return_value = mock_updater
+
+            await executor.execute(context, event_queue)
+
+            assert agent.stream_called is True
+            # first status update for start + two chunks + completion
+            assert mock_updater.update_status.call_count >= 3
+            mock_updater.complete.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_execute_handles_exceptions(self):
         """Test execute method handles exceptions properly."""
         agent = MockAgent()
@@ -210,9 +304,10 @@ class TestGenericAgentExecutor:
             error_calls = [
                 call
                 for call in mock_updater.update_status.call_args_list
-                if "Error during" in str(call)
+                if call.args and call.args[0] == TaskState.failed
             ]
-            assert len(error_calls) > 0
+            assert len(error_calls) == 1
+            assert "Agent failed" in str(error_calls[0].kwargs["message"])
             mock_updater.complete.assert_called_once()
 
     @pytest.mark.asyncio

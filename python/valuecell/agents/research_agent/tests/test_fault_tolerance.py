@@ -77,6 +77,37 @@ def test_research_agent_initializes_without_knowledge_when_embeddings_missing(
     assert ra.knowledge_research_agent.search_knowledge is False
 
 
+def test_research_agent_disables_summaries_in_json_mode(monkeypatch):
+    # Prevent knowledge initialization side effects
+    import valuecell.agents.research_agent.core as core_mod
+
+    monkeypatch.setattr(core_mod, "get_knowledge", lambda: None)
+
+    import valuecell.utils.model as model_utils_mod
+
+    monkeypatch.setattr(model_utils_mod, "get_model_for_agent", lambda name: object())
+    monkeypatch.setattr(model_utils_mod, "model_should_use_json_mode", lambda _m: True)
+    monkeypatch.setattr(
+        model_utils_mod, "ensure_json_hint", lambda instr: [*instr, "json hint"]
+    )
+
+    captured: dict = {}
+
+    class DummyAgent:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(core_mod, "Agent", DummyAgent)
+
+    from valuecell.agents.research_agent.core import ResearchAgent
+
+    ResearchAgent()
+
+    assert captured.get("use_json_mode") is True
+    assert captured.get("enable_session_summaries") is False
+    assert "json hint" in captured.get("instructions", [])
+
+
 def test_get_vector_db_success_path(monkeypatch):
     import valuecell.agents.research_agent.vdb as vdb
 

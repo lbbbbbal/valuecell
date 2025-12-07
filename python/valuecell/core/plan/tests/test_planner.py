@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
+from types import SimpleNamespace
 
 import valuecell.core.plan.planner as planner_mod
 import valuecell.utils.model as model_utils_mod
@@ -28,6 +27,39 @@ class StubConnections:
 
     def get_agent_card(self, name: str):
         return self.cards.get(name)
+
+
+def test_planner_disables_summaries_when_using_json_mode(monkeypatch):
+    captured: dict = {}
+
+    class DummyAgent:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        def run(self, *args, **kwargs):
+            return SimpleNamespace(
+                is_paused=False, tools_requiring_user_input=[], tools=[], content=None
+            )
+
+    monkeypatch.setattr(planner_mod, "Agent", DummyAgent)
+    monkeypatch.setattr(
+        model_utils_mod, "get_model_for_agent", lambda *args, **kwargs: "stub-model"
+    )
+    monkeypatch.setattr(model_utils_mod, "model_should_use_json_mode", lambda _m: True)
+    monkeypatch.setattr(
+        model_utils_mod, "ensure_json_hint", lambda instr: [*instr, "json hint"]
+    )
+    monkeypatch.setattr(planner_mod, "agent_debug_mode_enabled", lambda: False)
+
+    research_card = SimpleNamespace(name="ResearchAgent", description="Research")
+    planner = ExecutionPlanner(StubConnections({"ResearchAgent": research_card}))
+
+    # Trigger lazy init
+    planner._get_or_init_agent()
+
+    assert captured.get("enable_session_summaries") is False
+    assert captured.get("use_json_mode") is True
+    assert "json hint" in captured.get("instructions", [])
 
 
 @pytest.mark.asyncio
@@ -210,6 +242,8 @@ async def test_create_plan_rejects_non_planable_agents(
     assert plan.tasks == []
     assert plan.guidance_message
     assert "unsupported agent" in plan.guidance_message
+    assert "Available agents" in plan.guidance_message
+    assert "VisibleAgent" in plan.guidance_message
 
 
 def test_tool_get_enabled_agents_formats_cards(monkeypatch: pytest.MonkeyPatch):

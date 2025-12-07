@@ -10,7 +10,7 @@ Migration Notes:
 """
 
 import os
-from typing import Optional
+from typing import List, Optional
 
 from agno.models.base import Model as AgnoModel
 from agno.models.dashscope import DashScope as AgnoDashScopeModel
@@ -136,6 +136,22 @@ def model_should_use_json_mode(model: AgnoModel) -> bool:
         return True
 
     return False
+
+
+def ensure_json_hint(instructions: List[str]) -> List[str]:
+    """Ensure at least one instruction mentions "json" for JSON-mode models.
+
+    DashScope requires that some message text explicitly contain the word
+    "json" (case-insensitive) whenever `response_format` is set to
+    `json_object`. When JSON mode is enabled, callers should pass their
+    instruction list through this helper to guarantee compliance without
+    duplicating the hint if it already exists.
+    """
+
+    if any("json" in instr.lower() for instr in instructions):
+        return instructions
+
+    return [*instructions, "Always respond with a single json object."]
 
 
 def get_model(env_key: str, **kwargs):

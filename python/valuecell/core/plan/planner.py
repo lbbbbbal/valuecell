@@ -100,6 +100,8 @@ class ExecutionPlanner:
         try:
             # Fetch model via utils module reference so tests can monkeypatch it reliably
             model = model_utils_mod.get_model_for_agent("super_agent")
+            instructions = model_utils_mod.ensure_json_hint([PLANNER_INSTRUCTION])
+            use_json_mode = model_utils_mod.model_should_use_json_mode(model)
             self.agent = Agent(
                 model=model,
                 tools=[
@@ -109,19 +111,22 @@ class ExecutionPlanner:
                     self.tool_get_enabled_agents,
                 ],
                 debug_mode=agent_debug_mode_enabled(),
-                instructions=[PLANNER_INSTRUCTION],
+                instructions=instructions,
                 # output format
                 markdown=False,
                 output_schema=PlannerResponse,
                 expected_output=PLANNER_EXPECTED_OUTPUT,
-                use_json_mode=model_utils_mod.model_should_use_json_mode(model),
+                use_json_mode=use_json_mode,
                 # context
                 db=InMemoryDb(),
                 add_datetime_to_context=True,
                 add_history_to_context=True,
                 num_history_runs=5,
                 read_chat_history=True,
-                enable_session_summaries=True,
+                # DashScope requires a 'json' mention in summaries when JSON mode is
+                # enabled, so skip session summaries to avoid 400 errors from
+                # auto-generated memory prompts.
+                enable_session_summaries=not use_json_mode,
             )
             return self.agent
         except Exception as exc:
@@ -287,6 +292,7 @@ class ExecutionPlanner:
                 "Planner selected unsupported agent(s):"
                 f" {invalid_list}."
                 f" Maybe the chosen model `{model_description}` hallucinated."
+                f" Available agents: {available_agents}."
             )
             logger.warning(
                 "Planner proposed unsupported agents: %s (available: %s)",

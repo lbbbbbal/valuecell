@@ -385,7 +385,7 @@ class ResponseFactory:
         task_id: str,
         agent_name: Optional[str] = None,
     ) -> TaskCompletedResponse:
-        """Create a TaskCompletedResponse signalling successful completion.
+        """Create a TaskCompletedResponse signaling successful completion.
 
         Args:
             conversation_id: Conversation id for the task.

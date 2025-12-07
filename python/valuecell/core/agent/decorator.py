@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import AsyncIterable, Iterable
 from typing import Type
 
 import httpx
@@ -31,6 +32,46 @@ from valuecell.utils import parse_host_port
 from .responses import EventPredicates
 
 logger = logging.getLogger(__name__)
+
+
+def _wrap_single_response(
+    response: StreamResponse | NotifyResponse,
+) -> AsyncIterable[StreamResponse | NotifyResponse]:
+    """Create an async iterable from a single response instance."""
+
+    async def _generator():
+        yield response
+
+    return _generator()
+
+
+def _ensure_async_iterable(
+    response_iterable: object, agent_name: str
+) -> AsyncIterable[StreamResponse | NotifyResponse]:
+    """Normalize agent responses into an async iterable.
+
+    Accepts async iterables, sync iterables, or single response objects and
+    converts them into an async iterable stream. Raises a clear error for
+    unsupported types so agent implementations fail fast during execution.
+    """
+
+    if isinstance(response_iterable, (StreamResponse, NotifyResponse)):
+        return _wrap_single_response(response_iterable)
+
+    if hasattr(response_iterable, "__aiter__"):
+        return response_iterable  # type: ignore[return-value]
+
+    if isinstance(response_iterable, Iterable):
+        async def _iter_to_async():
+            for item in response_iterable:
+                yield item
+
+        return _iter_to_async()
+
+    raise TypeError(
+        f"Agent {agent_name} must return an async iterable or response, "
+        f"got {type(response_iterable)}"
+    )
 
 
 def _serve(agent_card: AgentCard):
@@ -179,9 +220,12 @@ class GenericAgentExecutor(AgentExecutor):
                 if task_meta and task_meta.get("notify")
                 else self.agent.stream
             )
-            async for response in query_handler(
-                query, context_id, task_id, dependencies
-            ):
+            response_iterable = query_handler(query, context_id, task_id, dependencies)
+
+            if asyncio.iscoroutine(response_iterable):
+                response_iterable = await response_iterable
+
+            async for response in _ensure_async_iterable(response_iterable, agent_name):
                 if not isinstance(response, (StreamResponse, NotifyResponse)):
                     raise ValueError(
                         f"Agent {agent_name} yielded invalid response type: {type(response)}"

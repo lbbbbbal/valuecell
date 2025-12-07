@@ -24,7 +24,7 @@ def _default_db_path() -> str:
     Mirrors `.env` location so the SQLite file lives alongside user-level config:
     - macOS: `~/Library/Application Support/ValueCell/valuecell.db`
     - Linux: `~/.config/valuecell/valuecell.db`
-    - Windows: `%APPDATA%\ValueCell\valuecell.db`
+    - Windows: `%APPDATA%\\ValueCell\\valuecell.db`
     """
     system_dir = get_system_env_dir()
     return f"sqlite:///{os.path.join(str(system_dir), 'valuecell.db')}"

@@ -210,6 +210,8 @@ async def test_create_plan_rejects_non_planable_agents(
     assert plan.tasks == []
     assert plan.guidance_message
     assert "unsupported agent" in plan.guidance_message
+    assert "Available agents" in plan.guidance_message
+    assert "VisibleAgent" in plan.guidance_message
 
 
 def test_tool_get_enabled_agents_formats_cards(monkeypatch: pytest.MonkeyPatch):

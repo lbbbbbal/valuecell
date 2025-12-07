@@ -1,0 +1,29 @@
+{
+  "name": "SentimentAgent",
+  "display_name": "Sentiment Agent",
+  "url": "http://localhost:10009/",
+  "description": "Quantifies social hype (CryptoPanic/LunarCrush) into 0-10 scores for symbols.",
+  "capabilities": {
+    "streaming": true,
+    "push_notifications": false
+  },
+  "skills": [
+    {
+      "id": "sentiment_scan",
+      "name": "Social Sentiment Scan",
+      "description": "Fetch social sentiment for symbols and highlight catalysts.",
+      "examples": [
+        "Check BTC and ETH social sentiment",
+        "Which altcoins have >8/10 hype right now?"
+      ],
+      "tags": ["sentiment", "social", "hype", "monitor"]
+    }
+  ],
+  "enabled": true,
+  "metadata": {
+    "version": "0.1.0",
+    "author": "ValueCell Team",
+    "tags": ["sentiment", "social", "momentum"],
+    "local_agent_class": "valuecell.agents.sentiment_agent.core:SentimentAgent"
+  }
+}

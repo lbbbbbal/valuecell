@@ -29,6 +29,7 @@ from .interfaces import (
     CandleBasedFeatureComputer,
 )
 from .market_snapshot import MarketSnapshotFeatureComputer
+from .sentiment import SentimentFeatureComputer
 
 
 class DefaultFeaturesPipeline(BaseFeaturesPipeline):
@@ -41,6 +42,7 @@ class DefaultFeaturesPipeline(BaseFeaturesPipeline):
         market_data_source: BaseMarketDataSource,
         candle_feature_computer: CandleBasedFeatureComputer,
         market_snapshot_computer: MarketSnapshotFeatureComputer,
+        sentiment_feature_computer: SentimentFeatureComputer | None = None,
         candle_configurations: Optional[List[CandleConfig]] = None,
     ) -> None:
         self._request = request
@@ -48,6 +50,7 @@ class DefaultFeaturesPipeline(BaseFeaturesPipeline):
         self._candle_feature_computer = candle_feature_computer
         self._symbols = list(dict.fromkeys(request.trading_config.symbols))
         self._market_snapshot_computer = market_snapshot_computer
+        self._sentiment_feature_computer = sentiment_feature_computer
         self._candle_configurations = candle_configurations
         self._candle_configurations = candle_configurations or self._build_default_candle_configs()
 
@@ -74,6 +77,13 @@ class DefaultFeaturesPipeline(BaseFeaturesPipeline):
                 market_snapshot, self._request.exchange_config.exchange_id
             )
 
+        async def _fetch_sentiment() -> List[FeatureVector]:
+            if not self._sentiment_feature_computer:
+                return []
+            return await self._sentiment_feature_computer.compute_features(
+                self._symbols, self._request.exchange_config.exchange_id
+            )
+
         logger.info(
             f"Starting concurrent data fetching for {len(self._candle_configurations)} candle sets and markets snapshot..."
         )
@@ -82,11 +92,13 @@ class DefaultFeaturesPipeline(BaseFeaturesPipeline):
             for config in self._candle_configurations
         ]
         tasks.append(_fetch_market_features())
+        tasks.append(_fetch_sentiment())
 
         # results = [ [candle_features_1], [candle_features_2], ..., [market_features] ]
         results = await asyncio.gather(*tasks)
         logger.info("Concurrent data fetching complete.")
 
+        sentiment_features: List[FeatureVector] = results.pop()
         market_features: List[FeatureVector] = results.pop()
 
         # Flatten the list of lists of candle features
@@ -95,6 +107,7 @@ class DefaultFeaturesPipeline(BaseFeaturesPipeline):
         )
 
         candle_features.extend(market_features)
+        candle_features.extend(sentiment_features)
 
         return FeaturesPipelineResult(features=candle_features)
 
@@ -106,11 +119,13 @@ class DefaultFeaturesPipeline(BaseFeaturesPipeline):
         )
         candle_feature_computer = SimpleCandleFeatureComputer()
         market_snapshot_computer = MarketSnapshotFeatureComputer()
+        sentiment_feature_computer = SentimentFeatureComputer()
         return cls(
             request=request,
             market_data_source=market_data_source,
             candle_feature_computer=candle_feature_computer,
             market_snapshot_computer=market_snapshot_computer,
+            sentiment_feature_computer=sentiment_feature_computer,
         )
 
     def _build_default_candle_configs(self) -> list[CandleConfig]:

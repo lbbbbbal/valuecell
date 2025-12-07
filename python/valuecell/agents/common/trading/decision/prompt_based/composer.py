@@ -9,6 +9,10 @@ from loguru import logger
 from valuecell.utils import env as env_utils
 from valuecell.utils import model as model_utils
 
+from ...constants import (
+    FEATURE_GROUP_BY_MARKET_SNAPSHOT,
+    FEATURE_GROUP_BY_SENTIMENT,
+)
 from ...models import (
     ComposeContext,
     ComposeResult,
@@ -24,6 +28,72 @@ from ...utils import (
 )
 from ..interfaces import BaseComposer
 from .system_prompt import SYSTEM_PROMPT
+
+
+def _score_technical(features: dict) -> float:
+    """Derive a bounded technical score (0-10) from market snapshot features."""
+
+    change_pct = features.get("price.change_pct")
+    volume = features.get("price.volume")
+
+    score = 5.0
+    if isinstance(change_pct, (int, float)):
+        score += max(-5.0, min(5.0, float(change_pct) * 0.4))
+
+    if isinstance(volume, (int, float)) and volume > 0:
+        score += 0.3
+
+    return max(0.0, min(10.0, score))
+
+
+def compute_hybrid_scoreboard(context: ComposeContext) -> dict:
+    """Combine technical and sentiment scores per symbol with dynamic weights."""
+
+    grouped = group_features(context.features)
+    market_group = grouped.get(FEATURE_GROUP_BY_MARKET_SNAPSHOT, [])
+    sentiment_group = grouped.get(FEATURE_GROUP_BY_SENTIMENT, [])
+
+    sentiment_by_symbol = {}
+    for entry in sentiment_group:
+        values = entry.get("values") or {}
+        symbol = (entry.get("instrument") or {}).get("symbol")
+        if not symbol:
+            continue
+        try:
+            sentiment_by_symbol[symbol] = float(values.get("sentiment.score") or 5.0)
+        except (TypeError, ValueError):
+            sentiment_by_symbol[symbol] = 5.0
+
+    scoreboard: dict = {}
+    for snapshot in market_group:
+        symbol = (snapshot.get("instrument") or {}).get("symbol")
+        if not symbol:
+            continue
+
+        technical_score = _score_technical(snapshot.get("values") or {})
+        sentiment_score = sentiment_by_symbol.get(symbol, 5.0)
+
+        sentiment_weight = 0.4
+        technical_weight = 0.6
+        if sentiment_score > 8.0:
+            sentiment_weight = 0.6
+            technical_weight = 0.4
+
+        final_score = (sentiment_score * sentiment_weight) + (
+            technical_score * technical_weight
+        )
+
+        scoreboard[symbol] = {
+            "technical_score": round(technical_score, 2),
+            "sentiment_score": round(sentiment_score, 2),
+            "weights": {
+                "sentiment": sentiment_weight,
+                "technical": technical_weight,
+            },
+            "final_score": round(final_score, 2),
+        }
+
+    return scoreboard
 
 
 class LlmComposer(BaseComposer):
@@ -148,6 +218,7 @@ class LlmComposer(BaseComposer):
         summary = self._build_summary(context)
         features = group_features(context.features)
         market = extract_market_section(features.get("market_snapshot", []))
+        hybrid_scores = compute_hybrid_scoreboard(context)
 
         # Portfolio positions
         positions = [
@@ -174,6 +245,7 @@ class LlmComposer(BaseComposer):
                 "summary": summary,
                 "market": market,
                 "features": features,
+                "hybrid_scores": hybrid_scores or None,
                 "positions": positions,
                 "constraints": constraints,
             }

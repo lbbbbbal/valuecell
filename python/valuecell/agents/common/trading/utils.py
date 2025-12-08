@@ -6,6 +6,7 @@ import httpx
 from loguru import logger
 
 from valuecell.agents.common.trading.constants import (
+    FEATURE_GROUP_BY_INTERVAL_PREFIX,
     FEATURE_GROUP_BY_KEY,
     FEATURE_GROUP_BY_MARKET_SNAPSHOT,
 )
@@ -304,6 +305,11 @@ def group_features(features: List[FeatureVector]) -> Dict:
         data = fv.model_dump(mode="json")
         meta = data.get("meta") or {}
         group_key = meta.get(FEATURE_GROUP_BY_KEY)
+
+        if not group_key:
+            interval = meta.get("interval")
+            if interval:
+                group_key = f"{FEATURE_GROUP_BY_INTERVAL_PREFIX}{interval}"
 
         if not group_key:
             continue

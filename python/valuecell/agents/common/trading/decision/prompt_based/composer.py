@@ -156,6 +156,34 @@ class LlmComposer(BaseComposer):
             return context
 
         return context.model_copy(update=updates)
+        """Attach narrative fusion and blended weights before prompting the LLM."""
+
+        narrative_signal = context.narrative_signal
+        if narrative_signal is None and context.news_signal and context.sentiment_signal:
+            narrative_signal = build_narrative_signal(
+                context.news_signal, context.sentiment_signal
+            )
+
+        signal_mix = context.signal_mix
+        if signal_mix is None and context.technical_score is not None:
+            signal_mix = mix_signals(
+                technical_score=context.technical_score,
+                narrative_signal=narrative_signal,
+                technical_floor=DEFAULT_TECHNICAL_FLOOR,
+            )
+
+        if (
+            narrative_signal is context.narrative_signal
+            and signal_mix is context.signal_mix
+        ):
+            return context
+
+        return context.model_copy(
+            update={
+                "narrative_signal": narrative_signal,
+                "signal_mix": signal_mix,
+            }
+        )
 
     def _build_summary(self, context: ComposeContext) -> Dict:
         """Build portfolio summary with risk metrics."""
@@ -226,6 +254,7 @@ class LlmComposer(BaseComposer):
         instructions = (
             "Read Context and decide. "
             "features.1h/15m/1m are structural trend blocks (direction + sizing guidance); features.1s is realtime microstructure for execution timing/ slippage risk only — do not let 1s flip higher-timeframe bias. "
+            "features.1m/15m/1h = structural trend blocks (multi-timeframe), features.1s = realtime signals (180 periods). "
             "market.funding_rate: positive = longs pay shorts. "
             "Respect constraints and risk_flags. Prefer NOOP when edge unclear. "
             "Always include a concise top-level 'rationale'. "

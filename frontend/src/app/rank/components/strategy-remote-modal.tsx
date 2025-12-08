@@ -19,7 +19,6 @@ import {
 import CopyStrategyModal, {
   type CopyStrategyModelRef,
 } from "@/components/valuecell/modal/copy-strategy-modal";
-import ScrollContainer from "@/components/valuecell/scroll/scroll-container";
 import { getChangeType, numberFixed } from "@/lib/utils";
 import { useStockColors } from "@/store/settings-store";
 export interface StrategyRemoteModalRef {
@@ -56,7 +55,7 @@ const StrategyRemoteModal: FC<StrategyRemoteModalProps> = ({ ref }) => {
         <DialogHeader>
           <DialogTitle>Strategy Details</DialogTitle>
         </DialogHeader>
-        <ScrollContainer>
+        <div className="scroll-container">
           {isLoadingStrategyDetail || !strategyDetail ? (
             <div className="py-8 text-center">Loading details...</div>
           ) : (
@@ -116,9 +115,9 @@ const StrategyRemoteModal: FC<StrategyRemoteModalProps> = ({ ref }) => {
               </div>
             </div>
           )}
-        </ScrollContainer>
+        </div>
 
-        <DialogFooter>
+        <DialogFooter className="mt-auto">
           <Button
             className="w-full"
             onClick={() =>
@@ -129,7 +128,10 @@ const StrategyRemoteModal: FC<StrategyRemoteModalProps> = ({ ref }) => {
                   api_key: "",
                 },
                 exchange_config: {
-                  exchange_id: strategyDetail?.exchange_id || "",
+                  exchange_id:
+                    strategyDetail?.exchange_id !== "virtual"
+                      ? (strategyDetail?.exchange_id ?? "")
+                      : "",
                   trading_mode: strategyDetail?.trading_mode || "virtual",
                   api_key: "",
                   secret_key: "",

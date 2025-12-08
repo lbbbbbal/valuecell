@@ -6,6 +6,7 @@ import httpx
 from loguru import logger
 
 from valuecell.agents.common.trading.constants import (
+    FEATURE_GROUP_BY_INTERVAL_PREFIX,
     FEATURE_GROUP_BY_KEY,
     FEATURE_GROUP_BY_MARKET_SNAPSHOT,
 )
@@ -293,10 +294,12 @@ def extract_market_section(market_data: List[Dict]) -> Dict:
 def group_features(features: List[FeatureVector]) -> Dict:
     """Organize features by grouping metadata and trim payload noise.
 
-    Prefers the FeatureVector.meta group_by_key when present, otherwise
-    falls back to the interval tag. This allows callers to introduce
-    ad-hoc groupings (e.g., market snapshots) without overloading the
-    interval field.
+    Priority rules (deterministic):
+    1) If meta.group_by_key is present, use it and ignore interval to avoid
+       double-serialization (e.g., market_snapshot stays isolated).
+    2) Otherwise, fall back to meta.interval and prefix with interval_.
+       This ensures structural 1m/15m/1h payloads always serialize even when
+       callers omit an explicit group key.
     """
     grouped: Dict[str, List] = {}
 
@@ -304,6 +307,11 @@ def group_features(features: List[FeatureVector]) -> Dict:
         data = fv.model_dump(mode="json")
         meta = data.get("meta") or {}
         group_key = meta.get(FEATURE_GROUP_BY_KEY)
+
+        if not group_key:
+            interval = meta.get("interval")
+            if interval:
+                group_key = f"{FEATURE_GROUP_BY_INTERVAL_PREFIX}{interval}"
 
         if not group_key:
             continue

@@ -60,7 +60,7 @@ def _resample_candles(
         grouped[candle.instrument.symbol].append(candle)
 
     resampled: List[Candle] = []
-    for _, series in grouped.items():
+    for symbol, series in grouped.items():
         series.sort(key=lambda item: item.ts)
         buckets: Dict[int, Dict[str, object]] = {}
         for candle in series:
@@ -84,9 +84,10 @@ def _resample_candles(
                 bucket["volume"] = float(bucket["volume"]) + float(candle.volume)
 
         bucket_starts = sorted(buckets.keys())
+        symbol_resampled: List[Candle] = []
         for start in bucket_starts:
             bucket = buckets[start]
-            resampled.append(
+            symbol_resampled.append(
                 Candle(
                     ts=int(bucket["ts"]),
                     instrument=bucket["instrument"],
@@ -99,9 +100,12 @@ def _resample_candles(
                 )
             )
 
+        if target_lookback is not None and len(symbol_resampled) > target_lookback:
+            symbol_resampled = symbol_resampled[-target_lookback:]
+
+        resampled.extend(symbol_resampled)
+
     resampled.sort(key=lambda item: item.ts)
-    if target_lookback is not None and len(resampled) > target_lookback:
-        resampled = resampled[-target_lookback:]
     return resampled
 
 

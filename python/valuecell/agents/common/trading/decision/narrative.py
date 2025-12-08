@@ -11,6 +11,17 @@ flags so downstream logic can trace how the blended score was formed.
 
 from typing import Optional
 
+__all__ = [
+    "DEFAULT_AGREEMENT_BOOST",
+    "DEFAULT_TECHNICAL_FLOOR",
+    "NewsSignal",
+    "SentimentSignal",
+    "NarrativeSignal",
+    "SignalMix",
+    "build_narrative_signal",
+    "mix_signals",
+]
+
 from pydantic import BaseModel, Field
 
 DEFAULT_AGREEMENT_BOOST: float = 0.5
@@ -109,6 +120,14 @@ def build_narrative_signal(
     )
     base_score = 0.5 * news_signal.news_score + 0.5 * sentiment_signal.social_score
 
+    if agreement_flag and (
+        news_signal.news_score > 8 or sentiment_signal.social_score > 8
+    ):
+        # Apply a bounded boost with headroom buffer to avoid sudden jumps at the cap
+        headroom = max(0.0, 10.0 - base_score)
+        base_score += min(headroom, max(0.0, agreement_boost))
+
+    base_score = min(10.0, max(0.0, base_score))
     if agreement_flag and (news_signal.news_score > 8 or sentiment_signal.social_score > 8):
         base_score = min(10.0, base_score + agreement_boost)
 
@@ -129,6 +148,7 @@ def build_narrative_signal(
 
 def mix_signals(
     *,
+    technical_score: float | None,
     technical_score: float,
     narrative_signal: Optional[NarrativeSignal],
     technical_floor: float = DEFAULT_TECHNICAL_FLOOR,
@@ -140,6 +160,18 @@ def mix_signals(
       0.6 narrative / 0.4 technical.
     - If narrative is missing, fall back to 100% technical.
     - If technical falls below the floor, mark micro_probe_only=True to
+      prevent primary positions regardless of narrative strength. This is the
+      single truth source for the micro-probe gating flag.
+    """
+
+    technical_value = max(0.0, float(technical_score or 0.0))
+    micro_probe_only = technical_value < technical_floor
+
+    if narrative_signal is None:
+        return SignalMix(
+            final_score=min(10.0, technical_value),
+            narrative_score=None,
+            technical_score=technical_value,
       prevent primary positions regardless of narrative strength.
     """
 
@@ -169,12 +201,14 @@ def mix_signals(
 
     final_score = (
         narrative_weight * narrative_signal.narrative_score
+        + technical_weight * technical_value
         + technical_weight * technical
     )
 
     return SignalMix(
         final_score=min(10.0, final_score),
         narrative_score=narrative_signal.narrative_score,
+        technical_score=technical_value,
         technical_score=technical,
         narrative_weight=narrative_weight,
         technical_weight=technical_weight,

@@ -122,6 +122,40 @@ class LlmComposer(BaseComposer):
     # ------------------------------------------------------------------
 
     def _prepare_context(self, context: ComposeContext) -> ComposeContext:
+        """Attach narrative fusion and blended weights before prompting the LLM.
+
+        Guardrails:
+        - Never overwrite caller-provided narrative or signal_mix.
+        - Only write back computed values when we actually synthesize them, to
+          avoid hidden mutations across compose invocations.
+        """
+
+        updates: Dict[str, object] = {}
+
+        if (
+            context.narrative_signal is None
+            and context.news_signal
+            and context.sentiment_signal
+        ):
+            updates["narrative_signal"] = build_narrative_signal(
+                context.news_signal, context.sentiment_signal
+            )
+
+        narrative_for_mix = updates.get("narrative_signal", context.narrative_signal)
+
+        if context.signal_mix is None and (
+            context.technical_score is not None or narrative_for_mix is not None
+        ):
+            updates["signal_mix"] = mix_signals(
+                technical_score=context.technical_score,
+                narrative_signal=narrative_for_mix,
+                technical_floor=DEFAULT_TECHNICAL_FLOOR,
+            )
+
+        if not updates:
+            return context
+
+        return context.model_copy(update=updates)
         """Attach narrative fusion and blended weights before prompting the LLM."""
 
         narrative_signal = context.narrative_signal
@@ -219,6 +253,7 @@ class LlmComposer(BaseComposer):
 
         instructions = (
             "Read Context and decide. "
+            "features.1h/15m/1m are structural trend blocks (direction + sizing guidance); features.1s is realtime microstructure for execution timing/ slippage risk only — do not let 1s flip higher-timeframe bias. "
             "features.1m/15m/1h = structural trend blocks (multi-timeframe), features.1s = realtime signals (180 periods). "
             "market.funding_rate: positive = longs pay shorts. "
             "Respect constraints and risk_flags. Prefer NOOP when edge unclear. "

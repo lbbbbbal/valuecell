@@ -280,7 +280,21 @@ class LlmComposer(BaseComposer):
                 }
             )
 
-        return prune_none(signal_block)
+        final_signals = prune_none(signal_block)
+        sanitized_signals = dict(final_signals)
+
+        rationale = sanitized_signals.get("narrative_rationale")
+        if rationale is not None:
+            sanitized_signals["narrative_rationale"] = (
+                rationale[:256] + "..." if len(rationale) > 256 else rationale
+            )
+
+        logger.info(
+            "Prompt signals block {signals}",
+            signals=json.dumps(sanitized_signals, ensure_ascii=False),
+        )
+
+        return final_signals
 
     async def _call_llm(self, prompt: str) -> TradePlanProposal:
         """Invoke an LLM asynchronously and parse the response into LlmPlanProposal.

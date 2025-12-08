@@ -37,6 +37,13 @@ def test_build_narrative_without_agreement() -> None:
     assert narrative.narrative_score == 6.5
 
 
+def test_build_narrative_missing_inputs_returns_none() -> None:
+    news_only = NewsSignal(news_score=7.0, direction="bullish")
+
+    assert build_narrative_signal(news_only, None) is None
+    assert build_narrative_signal(None, SentimentSignal(social_score=6.0, direction="bearish")) is None
+
+
 def test_mix_signals_switches_weights_on_strong_alignment() -> None:
     narrative = build_narrative_signal(
         NewsSignal(news_score=9.0, direction="bullish"),

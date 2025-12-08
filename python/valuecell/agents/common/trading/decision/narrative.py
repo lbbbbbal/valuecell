@@ -11,6 +11,17 @@ flags so downstream logic can trace how the blended score was formed.
 
 from typing import Optional
 
+__all__ = [
+    "DEFAULT_AGREEMENT_BOOST",
+    "DEFAULT_TECHNICAL_FLOOR",
+    "NewsSignal",
+    "SentimentSignal",
+    "NarrativeSignal",
+    "SignalMix",
+    "build_narrative_signal",
+    "mix_signals",
+]
+
 from pydantic import BaseModel, Field
 
 DEFAULT_AGREEMENT_BOOST: float = 0.5

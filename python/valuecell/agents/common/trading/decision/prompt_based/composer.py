@@ -144,6 +144,9 @@ class LlmComposer(BaseComposer):
         narrative_for_mix = updates.get("narrative_signal", context.narrative_signal)
 
         if context.signal_mix is None and context.technical_score is not None:
+        if context.signal_mix is None and (
+            context.technical_score is not None or narrative_for_mix is not None
+        ):
             updates["signal_mix"] = mix_signals(
                 technical_score=context.technical_score,
                 narrative_signal=narrative_for_mix,

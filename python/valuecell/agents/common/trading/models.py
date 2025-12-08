@@ -5,6 +5,12 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from valuecell.utils.ts import get_current_timestamp_ms
+from valuecell.agents.common.trading.decision.narrative import (
+    NarrativeSignal,
+    NewsSignal,
+    SentimentSignal,
+    SignalMix,
+)
 
 from .constants import (
     DEFAULT_AGENT_MODEL,
@@ -791,6 +797,22 @@ class ComposeContext(BaseModel):
     )
     portfolio: PortfolioView
     digest: "TradeDigest"
+    news_signal: Optional[NewsSignal] = Field(
+        default=None, description="Structured news sentiment from NewsAgent"
+    )
+    sentiment_signal: Optional[SentimentSignal] = Field(
+        default=None, description="Structured social sentiment from SentimentAgent"
+    )
+    narrative_signal: Optional[NarrativeSignal] = Field(
+        default=None, description="Fused narrative momentum signal"
+    )
+    technical_score: Optional[float] = Field(
+        default=None,
+        description="Technical momentum/quality score scaled 0-10",
+    )
+    signal_mix: Optional[SignalMix] = Field(
+        default=None, description="Final blended signal after weighting"
+    )
 
 
 class HistoryRecord(BaseModel):

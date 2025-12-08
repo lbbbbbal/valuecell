@@ -143,7 +143,6 @@ class LlmComposer(BaseComposer):
 
         narrative_for_mix = updates.get("narrative_signal", context.narrative_signal)
 
-        if context.signal_mix is None and context.technical_score is not None:
         if context.signal_mix is None and (
             context.technical_score is not None or narrative_for_mix is not None
         ):
@@ -157,34 +156,6 @@ class LlmComposer(BaseComposer):
             return context
 
         return context.model_copy(update=updates)
-        """Attach narrative fusion and blended weights before prompting the LLM."""
-
-        narrative_signal = context.narrative_signal
-        if narrative_signal is None and context.news_signal and context.sentiment_signal:
-            narrative_signal = build_narrative_signal(
-                context.news_signal, context.sentiment_signal
-            )
-
-        signal_mix = context.signal_mix
-        if signal_mix is None and context.technical_score is not None:
-            signal_mix = mix_signals(
-                technical_score=context.technical_score,
-                narrative_signal=narrative_signal,
-                technical_floor=DEFAULT_TECHNICAL_FLOOR,
-            )
-
-        if (
-            narrative_signal is context.narrative_signal
-            and signal_mix is context.signal_mix
-        ):
-            return context
-
-        return context.model_copy(
-            update={
-                "narrative_signal": narrative_signal,
-                "signal_mix": signal_mix,
-            }
-        )
 
     def _build_summary(self, context: ComposeContext) -> Dict:
         """Build portfolio summary with risk metrics."""

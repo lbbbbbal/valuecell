@@ -128,8 +128,6 @@ def build_narrative_signal(
         base_score += min(headroom, max(0.0, agreement_boost))
 
     base_score = min(10.0, max(0.0, base_score))
-    if agreement_flag and (news_signal.news_score > 8 or sentiment_signal.social_score > 8):
-        base_score = min(10.0, base_score + agreement_boost)
 
     rationale = news_signal.rationale or sentiment_signal.rationale
     if news_signal.rationale and sentiment_signal.rationale:
@@ -149,7 +147,6 @@ def build_narrative_signal(
 def mix_signals(
     *,
     technical_score: float | None,
-    technical_score: float,
     narrative_signal: Optional[NarrativeSignal],
     technical_floor: float = DEFAULT_TECHNICAL_FLOOR,
 ) -> SignalMix:
@@ -172,17 +169,6 @@ def mix_signals(
             final_score=min(10.0, technical_value),
             narrative_score=None,
             technical_score=technical_value,
-      prevent primary positions regardless of narrative strength.
-    """
-
-    technical = max(0.0, float(technical_score))
-    micro_probe_only = technical < technical_floor
-
-    if narrative_signal is None:
-        return SignalMix(
-            final_score=min(10.0, technical),
-            narrative_score=None,
-            technical_score=technical,
             narrative_weight=0.0,
             technical_weight=1.0,
             agreement_flag=False,
@@ -202,14 +188,12 @@ def mix_signals(
     final_score = (
         narrative_weight * narrative_signal.narrative_score
         + technical_weight * technical_value
-        + technical_weight * technical
     )
 
     return SignalMix(
         final_score=min(10.0, final_score),
         narrative_score=narrative_signal.narrative_score,
         technical_score=technical_value,
-        technical_score=technical,
         narrative_weight=narrative_weight,
         technical_weight=technical_weight,
         agreement_flag=narrative_signal.agreement_flag,

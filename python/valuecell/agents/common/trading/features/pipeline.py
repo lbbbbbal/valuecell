@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-from typing import List, Optional
+from collections import defaultdict
+from typing import Dict, Iterable, List, Optional
 
 from loguru import logger
 
 from valuecell.agents.common.trading.models import (
+    Candle,
     CandleConfig,
     FeaturesPipelineResult,
     FeatureVector,
@@ -29,6 +31,78 @@ from .interfaces import (
     CandleBasedFeatureComputer,
 )
 from .market_snapshot import MarketSnapshotFeatureComputer
+
+
+_INTERVAL_MULTIPLIERS: Dict[str, int] = {
+    "s": 1,
+    "m": 60,
+    "h": 60 * 60,
+}
+
+
+def _interval_to_seconds(interval: str) -> int:
+    unit = interval[-1]
+    multiplier = _INTERVAL_MULTIPLIERS.get(unit)
+    if multiplier is None:
+        raise ValueError(f"Unsupported interval unit: {interval}")
+    return int(interval[:-1]) * multiplier
+
+
+def _resample_candles(
+    candles: Iterable[Candle],
+    *,
+    target_interval: str,
+    target_interval_ms: int,
+    target_lookback: int | None = None,
+) -> List[Candle]:
+    grouped: Dict[str, List[Candle]] = defaultdict(list)
+    for candle in candles:
+        grouped[candle.instrument.symbol].append(candle)
+
+    resampled: List[Candle] = []
+    for _, series in grouped.items():
+        series.sort(key=lambda item: item.ts)
+        buckets: Dict[int, Dict[str, object]] = {}
+        for candle in series:
+            bucket_start = (candle.ts // target_interval_ms) * target_interval_ms
+            bucket = buckets.get(bucket_start)
+            if bucket is None:
+                bucket = {
+                    "instrument": candle.instrument,
+                    "open": candle.open,
+                    "high": candle.high,
+                    "low": candle.low,
+                    "close": candle.close,
+                    "volume": candle.volume,
+                    "ts": bucket_start + target_interval_ms,
+                }
+                buckets[bucket_start] = bucket
+            else:
+                bucket["close"] = candle.close
+                bucket["high"] = max(bucket["high"], candle.high)
+                bucket["low"] = min(bucket["low"], candle.low)
+                bucket["volume"] = float(bucket["volume"]) + float(candle.volume)
+
+        bucket_starts = sorted(buckets.keys())
+        for start in bucket_starts:
+            bucket = buckets[start]
+            resampled.append(
+                Candle(
+                    ts=int(bucket["ts"]),
+                    instrument=bucket["instrument"],
+                    open=float(bucket["open"]),
+                    high=float(bucket["high"]),
+                    low=float(bucket["low"]),
+                    close=float(bucket["close"]),
+                    volume=float(bucket["volume"]),
+                    interval=target_interval,
+                )
+            )
+
+    resampled.sort(key=lambda item: item.ts)
+    if target_lookback is not None and len(resampled) > target_lookback:
+        resampled = resampled[-target_lookback:]
+    return resampled
 
 
 class DefaultFeaturesPipeline(BaseFeaturesPipeline):
@@ -62,6 +136,16 @@ class DefaultFeaturesPipeline(BaseFeaturesPipeline):
             _candles = await self._market_data_source.get_recent_candles(
                 self._symbols, interval, lookback
             )
+            if not _candles and interval in {"15m", "1h"}:
+                logger.warning(
+                    "No candles returned for interval={}. Falling back to 1m resampling.",
+                    interval,
+                )
+                _candles = await self._resample_from_minute(interval, lookback)
+
+            if not _candles:
+                return []
+
             return self._candle_feature_computer.compute_features(candles=_candles)
 
         async def _fetch_market_features() -> List[FeatureVector]:
@@ -113,18 +197,65 @@ class DefaultFeaturesPipeline(BaseFeaturesPipeline):
             market_snapshot_computer=market_snapshot_computer,
         )
 
+    async def _resample_from_minute(
+        self, target_interval: str, target_lookback: int
+    ) -> List[Candle]:
+        target_seconds = _interval_to_seconds(target_interval)
+        minute_seconds = _interval_to_seconds("1m")
+        if target_seconds % minute_seconds != 0:
+            logger.warning(
+                "Cannot resample 1m candles into unsupported interval={}", target_interval
+            )
+            return []
+
+        ratio = target_seconds // minute_seconds
+        # Ensure we fetch enough 1m bars to build the requested target lookback plus a buffer
+        minute_lookback = (ratio * target_lookback) + 5
+        minute_candles = await self._market_data_source.get_recent_candles(
+            self._symbols, "1m", minute_lookback
+        )
+        if not minute_candles:
+            logger.warning(
+                "Unable to fetch 1m candles for resampling to interval={}, lookback={}",
+                target_interval,
+                target_lookback,
+            )
+            return []
+
+        target_interval_ms = target_seconds * 1000
+        resampled = _resample_candles(
+            minute_candles,
+            target_interval=target_interval,
+            target_interval_ms=target_interval_ms,
+            target_lookback=target_lookback,
+        )
+        logger.info(
+            "Resampled {} 1m candles into {} {} candles (requested lookback {}).",
+            len(minute_candles),
+            len(resampled),
+            target_interval,
+            target_lookback,
+        )
+        return resampled
+
     def _build_default_candle_configs(self) -> list[CandleConfig]:
         """Return default candle intervals, adapting to exchange support.
 
-        OKX does not offer 1-second OHLC candles, so fall back to 1-minute
-        candles only for that exchange. Other exchanges keep the original
-        1s + 1m pair to retain higher-frequency features.
+        OKX does not offer 1-second OHLC candles, so it skips 1s but still
+        requests 1m/15m/1h intervals. Other exchanges keep the 1s feed while
+        also fetching the higher intervals to support multi-timeframe signals.
         """
 
         if self._request.exchange_config.exchange_id.lower() == "okx":
-            return [CandleConfig(interval="1m", lookback=60 * 4)]
+            return [
+                CandleConfig(interval="1m", lookback=60 * 12),
+                CandleConfig(interval="15m", lookback=96),
+                CandleConfig(interval="1h", lookback=72),
+            ]
 
         return [
             CandleConfig(interval="1s", lookback=60 * 3),
-            CandleConfig(interval="1m", lookback=60 * 4),
+            CandleConfig(interval="1m", lookback=60 * 12),
+            CandleConfig(interval="15m", lookback=96),
+            CandleConfig(interval="1h", lookback=72),
         ]

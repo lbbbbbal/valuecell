@@ -1,0 +1,145 @@
+from valuecell.agents.common.trading.decision.narrative import (
+    DEFAULT_TECHNICAL_FLOOR,
+    NewsSignal,
+    SentimentSignal,
+    build_narrative_signal,
+    mix_signals,
+)
+from valuecell.agents.common.trading.decision.prompt_based.composer import (
+    LlmComposer,
+)
+from valuecell.agents.common.trading.models import (
+    ComposeContext,
+    PortfolioView,
+    TradeDigest,
+)
+
+
+def test_build_narrative_with_agreement_boost() -> None:
+    news = NewsSignal(news_score=9.0, direction="bullish", rationale="regulatory win")
+    social = SentimentSignal(
+        social_score=8.0,
+        direction="bullish",
+        sentiment_score=0.82,
+        rationale="community trending up",
+    )
+
+    narrative = build_narrative_signal(news, social)
+
+    assert narrative is not None
+    assert narrative.agreement_flag is True
+    # Base average 8.5, boosted to 9.0 with agreement bump capped at 10
+    assert narrative.narrative_score == 9.0
+    assert narrative.news_score == news.news_score
+    assert narrative.social_score == social.social_score
+
+
+def test_build_narrative_without_agreement() -> None:
+    news = NewsSignal(news_score=9.0, direction="bullish")
+    social = SentimentSignal(social_score=4.0, direction="bearish")
+
+    narrative = build_narrative_signal(news, social)
+
+    assert narrative is not None
+    assert narrative.agreement_flag is False
+    assert narrative.narrative_score == 6.5
+
+
+def test_build_narrative_missing_inputs_returns_none() -> None:
+    news_only = NewsSignal(news_score=7.0, direction="bullish")
+
+    assert build_narrative_signal(news_only, None) is None
+    assert build_narrative_signal(None, SentimentSignal(social_score=6.0, direction="bearish")) is None
+
+
+def test_mix_signals_switches_weights_on_strong_alignment() -> None:
+    narrative = build_narrative_signal(
+        NewsSignal(news_score=9.0, direction="bullish"),
+        SentimentSignal(social_score=9.0, direction="bullish"),
+    )
+    result = mix_signals(technical_score=6.0, narrative_signal=narrative)
+
+    assert result.mode == "agreement_tilt"
+    assert result.narrative_weight == 0.6
+    assert result.technical_weight == 0.4
+    # Boosted narrative (9.5) tilts the blend upward
+    assert round(result.final_score, 1) == 8.1
+
+
+def test_mix_signals_falls_back_to_technical_only_when_missing_narrative() -> None:
+    result = mix_signals(technical_score=7.5, narrative_signal=None)
+
+    assert result.mode == "technical_only"
+    assert result.narrative_weight == 0.0
+    assert result.technical_weight == 1.0
+    assert result.final_score == 7.5
+
+
+def test_micro_probe_flag_when_technical_below_floor() -> None:
+    narrative = build_narrative_signal(
+        NewsSignal(news_score=7.0, direction="bullish"),
+        SentimentSignal(social_score=7.0, direction="bullish"),
+    )
+    result = mix_signals(
+        technical_score=2.0,
+        narrative_signal=narrative,
+        technical_floor=DEFAULT_TECHNICAL_FLOOR,
+    )
+
+    assert result.micro_probe_only is True
+    assert result.final_score == 4.0
+
+
+def test_narrative_boost_respects_headroom_cap() -> None:
+    narrative = build_narrative_signal(
+        NewsSignal(news_score=10.0, direction="bullish"),
+        SentimentSignal(social_score=9.5, direction="bullish"),
+    )
+
+    assert narrative is not None
+    # Base 9.75 but capped to 10.0 with buffered boost
+    assert narrative.narrative_score == 10.0
+
+
+def test_mix_signals_handles_missing_technical_score() -> None:
+    narrative = build_narrative_signal(
+        NewsSignal(news_score=9.0, direction="bullish"),
+        SentimentSignal(social_score=9.0, direction="bullish"),
+    )
+
+    result = mix_signals(
+        technical_score=None,
+        narrative_signal=narrative,
+        technical_floor=DEFAULT_TECHNICAL_FLOOR,
+    )
+
+    assert result.micro_probe_only is True
+    assert result.mode == "agreement_tilt"
+    assert result.technical_weight == 0.4
+    assert round(result.final_score, 1) == 5.7
+
+
+def test_prepare_context_fills_signal_mix_without_technical_score() -> None:
+    """Composer should still blend signals to expose micro-probe gating."""
+
+    news = NewsSignal(news_score=9.0, direction="bullish")
+    social = SentimentSignal(social_score=9.0, direction="bullish")
+
+    context = ComposeContext(
+        ts=1,
+        compose_id="c-1",
+        portfolio=PortfolioView(ts=1, account_balance=1000.0),
+        digest=TradeDigest(ts=1),
+        news_signal=news,
+        sentiment_signal=social,
+        technical_score=None,
+    )
+
+    composer = object.__new__(LlmComposer)
+    prepared = composer._prepare_context(context)
+
+    assert prepared.signal_mix is not None
+    assert prepared.signal_mix.micro_probe_only is True
+    assert prepared.signal_mix.mode == "agreement_tilt"
+    assert prepared.signal_mix.final_score > 0.0
+

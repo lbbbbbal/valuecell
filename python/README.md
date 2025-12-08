@@ -22,6 +22,15 @@ uv sync --group dev
 uv run python -c "import valuecell as vc; print(vc.__version__)"
 ```
 
+## Testing
+
+Install test dependencies and run the suite (ensures packages like `pydantic` and `httpx` are available):
+
+```bash
+uv sync --group dev
+uv run pytest
+```
+
 ## Installation
 
 ### Development Installation

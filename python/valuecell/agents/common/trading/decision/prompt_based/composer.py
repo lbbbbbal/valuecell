@@ -16,6 +16,11 @@ from ...models import (
     TradePlanProposal,
     UserRequest,
 )
+from ..narrative import (
+    DEFAULT_TECHNICAL_FLOOR,
+    build_narrative_signal,
+    mix_signals,
+)
 from ...utils import (
     extract_market_section,
     group_features,
@@ -88,6 +93,7 @@ class LlmComposer(BaseComposer):
         return f"Compose trading instructions for symbols: {symbols}."
 
     async def compose(self, context: ComposeContext) -> ComposeResult:
+        context = self._prepare_context(context)
         prompt = self._build_llm_prompt(context)
         try:
             plan = await self._call_llm(prompt)
@@ -115,6 +121,42 @@ class LlmComposer(BaseComposer):
 
     # ------------------------------------------------------------------
 
+    def _prepare_context(self, context: ComposeContext) -> ComposeContext:
+        """Attach narrative fusion and blended weights before prompting the LLM.
+
+        Guardrails:
+        - Never overwrite caller-provided narrative or signal_mix.
+        - Only write back computed values when we actually synthesize them, to
+          avoid hidden mutations across compose invocations.
+        """
+
+        updates: Dict[str, object] = {}
+
+        if (
+            context.narrative_signal is None
+            and context.news_signal
+            and context.sentiment_signal
+        ):
+            updates["narrative_signal"] = build_narrative_signal(
+                context.news_signal, context.sentiment_signal
+            )
+
+        narrative_for_mix = updates.get("narrative_signal", context.narrative_signal)
+
+        if context.signal_mix is None and (
+            context.technical_score is not None or narrative_for_mix is not None
+        ):
+            updates["signal_mix"] = mix_signals(
+                technical_score=context.technical_score,
+                narrative_signal=narrative_for_mix,
+                technical_floor=DEFAULT_TECHNICAL_FLOOR,
+            )
+
+        if not updates:
+            return context
+
+        return context.model_copy(update=updates)
+
     def _build_summary(self, context: ComposeContext) -> Dict:
         """Build portfolio summary with risk metrics."""
         pv = context.portfolio
@@ -138,7 +180,7 @@ class LlmComposer(BaseComposer):
         Produces a compact JSON with:
         - summary: portfolio metrics + risk signals
         - market: compacted price/OI/funding data
-        - features: organized by interval (1m structural, 1s realtime)
+        - features: organized by interval (1m/15m/1h structural, 1s realtime)
         - portfolio: current positions
         - digest: per-symbol historical performance
         """
@@ -148,6 +190,7 @@ class LlmComposer(BaseComposer):
         summary = self._build_summary(context)
         features = group_features(context.features)
         market = extract_market_section(features.get("market_snapshot", []))
+        signals = self._serialize_signals(context)
 
         # Portfolio positions
         positions = [
@@ -176,12 +219,13 @@ class LlmComposer(BaseComposer):
                 "features": features,
                 "positions": positions,
                 "constraints": constraints,
+                "signals": signals,
             }
         )
 
         instructions = (
             "Read Context and decide. "
-            "features.1m = structural trends (240 periods), features.1s = realtime signals (180 periods). "
+            "features.1h/15m/1m are structural trend blocks (direction + sizing guidance); features.1s is realtime microstructure for execution timing/ slippage risk only — do not let 1s flip higher-timeframe bias. "
             "market.funding_rate: positive = longs pay shorts. "
             "Respect constraints and risk_flags. Prefer NOOP when edge unclear. "
             "Always include a concise top-level 'rationale'. "
@@ -190,6 +234,52 @@ class LlmComposer(BaseComposer):
         )
 
         return f"{instructions}\n\nContext:\n{json.dumps(payload, ensure_ascii=False)}"
+
+    def _serialize_signals(self, context: ComposeContext) -> Dict | None:
+        """Return compact signal block for automated trading prompt guidance."""
+
+        if (
+            context.signal_mix is None
+            and context.narrative_signal is None
+            and context.sentiment_signal is None
+            and context.technical_score is None
+        ):
+            return None
+
+        narrative = context.narrative_signal
+        sentiment = context.sentiment_signal
+        mix = context.signal_mix
+
+        signal_block: Dict[str, object] = {}
+
+        if sentiment is not None:
+            signal_block["social_score"] = sentiment.social_score
+            signal_block["sentiment_score"] = sentiment.sentiment_score
+            signal_block["social_direction"] = sentiment.direction
+
+        if narrative is not None:
+            signal_block["narrative_score"] = narrative.narrative_score
+            signal_block["news_score"] = narrative.news_score
+            signal_block.setdefault("social_score", narrative.social_score)
+            signal_block["agreement_flag"] = narrative.agreement_flag
+            signal_block["narrative_rationale"] = narrative.rationale
+
+        if context.technical_score is not None:
+            signal_block["technical_score"] = context.technical_score
+
+        if mix is not None:
+            signal_block.update(
+                {
+                    "final_score": mix.final_score,
+                    "narrative_weight": mix.narrative_weight,
+                    "technical_weight": mix.technical_weight,
+                    "micro_probe_only": mix.micro_probe_only,
+                    "mix_mode": mix.mode,
+                    "technical_floor": mix.technical_floor,
+                }
+            )
+
+        return prune_none(signal_block)
 
     async def _call_llm(self, prompt: str) -> TradePlanProposal:
         """Invoke an LLM asynchronously and parse the response into LlmPlanProposal.

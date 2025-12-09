@@ -389,7 +389,7 @@ class GridParamAdvice(BaseModel):
 
 
 CommonKeyType = str
-CommonValueType = float | str | int
+CommonValueType = float | str | int | None
 
 
 class FeatureVector(BaseModel):
@@ -401,7 +401,11 @@ class FeatureVector(BaseModel):
     )
     instrument: InstrumentRef
     values: Dict[CommonKeyType, CommonValueType | List[CommonValueType]] = Field(
-        default_factory=dict, description="Feature name to numeric value"
+        default_factory=dict,
+        description=(
+            "Feature name to numeric value; individual entries MAY be None when "
+            "a computation window has insufficient data."
+        ),
     )
     meta: Optional[Dict[CommonKeyType, CommonValueType]] = Field(
         default=None,

@@ -60,14 +60,17 @@ async def test_fapi_kline_parsing():
 
 
 class CCXTDummy:
-    def __init__(self, market_type: str = "future") -> None:
+    def __init__(self, market_type: str = "future", markets: Dict[str, Dict[str, Any]] | None = None) -> None:
         self.market_type = market_type
         self.closed = False
+        self._markets = markets
+        self.last_symbol: str | None = None
 
     async def load_markets(self) -> Dict[str, Dict[str, Any]]:
-        return {"BTC/USDT:USDT": {"type": self.market_type, "linear": True}}
+        return self._markets or {"BTC/USDT:USDT": {"type": self.market_type, "linear": True, "symbol": "BTC/USDT:USDT"}}
 
     async def fetch_ohlcv(self, symbol: str, timeframe: str, since: Any, limit: int, params: Dict[str, Any]) -> List[List[Any]]:
+        self.last_symbol = symbol
         return [[1690000000000, 1, 2, 0.5, 1.5, 10]]
 
     async def close(self) -> None:
@@ -91,6 +94,18 @@ async def test_ccxt_rejects_spot():
     md = BinanceMarketData(client=DummyClient({}), ccxt_client=CCXTDummy(market_type="spot"))
     with pytest.raises(RuntimeError):
         await md._fetch_ccxt_klines("BTCUSDT", "1m", 1, None, None)
+
+
+@pytest.mark.asyncio
+async def test_ccxt_resolves_busd_symbol():
+    markets = {
+        "BTC/BUSD:BUSD": {"type": "future", "linear": True, "symbol": "BTC/BUSD:BUSD"},
+        "BTC/USDT:USDT": {"type": "future", "linear": True, "symbol": "BTC/USDT:USDT"},
+    }
+    md = BinanceMarketData(client=DummyClient({}), ccxt_client=CCXTDummy(markets=markets))
+    block = await md._fetch_ccxt_klines("BTCBUSD", "1m", 1, None, None)
+    assert len(block) == 1
+    assert md.ccxt_client.last_symbol == "BTC/BUSD:BUSD"
 
 
 @pytest.mark.asyncio

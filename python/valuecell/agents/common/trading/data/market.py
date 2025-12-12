@@ -31,6 +31,16 @@ class SimpleMarketDataSource(BaseMarketDataSource):
         else:
             self._exchange_id = exchange_id
 
+        # Prefer USD-M futures class for Binance to avoid spot REST fallbacks.
+        self._resolved_exchange_id = (
+            "binanceusdm" if self._exchange_id.lower() == "binance" else self._exchange_id
+        )
+
+        self._exchange = None
+        self._markets_loaded = False
+        self._exchange_lock = asyncio.Lock()
+        self._markets_lock = asyncio.Lock()
+
     def _normalize_symbol(self, symbol: str) -> str:
         """Normalize symbol format for specific exchanges.
 
@@ -59,27 +69,27 @@ class SimpleMarketDataSource(BaseMarketDataSource):
         self, symbols: List[str], interval: str, lookback: int
     ) -> List[Candle]:
         async def _fetch_and_process(symbol: str) -> List[Candle]:
-            # instantiate exchange class by name (e.g., ccxtpro.kraken)
-            exchange_cls = get_exchange_cls(self._exchange_id)
-            exchange = exchange_cls({"newUpdates": False})
+            exchange = await self._get_exchange()
 
             symbol_candles: List[Candle] = []
             normalized_symbol = self._normalize_symbol(symbol)
             try:
+                symbol_ready = await self._ensure_symbol_cached(exchange, normalized_symbol)
+                if not symbol_ready:
+                    logger.warning(
+                        "Symbol {symbol} missing from {exchange} markets after reload, skipping",
+                        symbol=normalized_symbol,
+                        exchange=self._resolved_exchange_id,
+                    )
+                    return []
+
                 try:
-                    # ccxt.pro uses async fetch_ohlcv with normalized symbol
                     raw = await exchange.fetch_ohlcv(
                         normalized_symbol,
                         timeframe=interval,
                         since=None,
                         limit=lookback,
                     )
-                finally:
-                    try:
-                        await exchange.close()
-                    except Exception:
-                        pass
-
                 # raw is list of [ts, open, high, low, close, volume]
                 for row in raw:
                     ts, open_v, high_v, low_v, close_v, vol = row
@@ -206,49 +216,91 @@ class SimpleMarketDataSource(BaseMarketDataSource):
         """
         snapshot = defaultdict(dict)
 
-        exchange_cls = get_exchange_cls(self._exchange_id)
-        exchange = exchange_cls({"newUpdates": False})
-        try:
-            for symbol in symbols:
-                sym = normalize_symbol(symbol)
+        exchange = await self._get_exchange()
+        for symbol in symbols:
+            sym = normalize_symbol(symbol)
+            try:
+                symbol_ready = await self._ensure_symbol_cached(exchange, sym)
+                if not symbol_ready:
+                    logger.warning(
+                        "Symbol {symbol} missing from {exchange} markets after reload, skipping",
+                        symbol=sym,
+                        exchange=self._resolved_exchange_id,
+                    )
+                    continue
+
+                ticker = await exchange.fetch_ticker(sym)
+                snapshot[symbol]["price"] = ticker
+
+                # best-effort: warm other endpoints (open interest / funding)
                 try:
-                    ticker = await exchange.fetch_ticker(sym)
-                    snapshot[symbol]["price"] = ticker
-
-                    # best-effort: warm other endpoints (open interest / funding)
-                    try:
-                        oi = await exchange.fetch_open_interest(sym)
-                        snapshot[symbol]["open_interest"] = oi
-                    except Exception:
-                        logger.exception(
-                            "Failed to fetch open interest for {} at {}",
-                            symbol,
-                            self._exchange_id,
-                        )
-
-                    try:
-                        fr = await exchange.fetch_funding_rate(sym)
-                        snapshot[symbol]["funding_rate"] = fr
-                    except Exception:
-                        logger.exception(
-                            "Failed to fetch funding rate for {} at {}",
-                            symbol,
-                            self._exchange_id,
-                        )
-                    logger.debug(f"Fetch market snapshot for {sym} data: {snapshot}")
+                    oi = await exchange.fetch_open_interest(sym)
+                    snapshot[symbol]["open_interest"] = oi
                 except Exception:
                     logger.exception(
-                        "Failed to fetch market snapshot for {} at {}",
+                        "Failed to fetch open interest for {} at {}",
                         symbol,
                         self._exchange_id,
                     )
-        finally:
-            try:
-                await exchange.close()
+
+                try:
+                    fr = await exchange.fetch_funding_rate(sym)
+                    snapshot[symbol]["funding_rate"] = fr
+                except Exception:
+                    logger.exception(
+                        "Failed to fetch funding rate for {} at {}",
+                        symbol,
+                        self._exchange_id,
+                    )
+                logger.debug(f"Fetch market snapshot for {sym} data: {snapshot}")
             except Exception:
                 logger.exception(
-                    "Failed to close exchange connection for {}",
+                    "Failed to fetch market snapshot for {} at {}",
+                    symbol,
                     self._exchange_id,
                 )
 
         return dict(snapshot)
+
+    async def _get_exchange(self):
+        if self._exchange is None:
+            async with self._exchange_lock:
+                if self._exchange is None:
+                    exchange_cls = get_exchange_cls(self._resolved_exchange_id)
+                    self._exchange = exchange_cls({"newUpdates": False})
+
+        if not self._markets_loaded:
+            await self._load_markets()
+
+        return self._exchange
+
+    async def _load_markets(self, force: bool = False) -> None:
+        if self._markets_loaded and not force:
+            return
+
+        async with self._markets_lock:
+            if self._markets_loaded and not force:
+                return
+
+            try:
+                await self._exchange.load_markets()
+                self._markets_loaded = True
+            except Exception as exc:
+                self._markets_loaded = False
+                raise RuntimeError(
+                    f"Failed to load markets for {self._resolved_exchange_id}: {exc}"
+                ) from exc
+
+    async def _ensure_symbol_cached(self, exchange, symbol: str) -> bool:
+        markets = getattr(exchange, "markets", {}) or {}
+        if symbol in markets:
+            return True
+
+        logger.warning(
+            "Symbol {symbol} not found in {exchange} markets; refreshing cache",
+            symbol=symbol,
+            exchange=self._resolved_exchange_id,
+        )
+        await self._load_markets(force=True)
+        markets = getattr(exchange, "markets", {}) or {}
+        return symbol in markets

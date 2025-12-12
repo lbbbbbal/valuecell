@@ -83,13 +83,12 @@ class SimpleMarketDataSource(BaseMarketDataSource):
                     )
                     return []
 
-                try:
-                    raw = await exchange.fetch_ohlcv(
-                        normalized_symbol,
-                        timeframe=interval,
-                        since=None,
-                        limit=lookback,
-                    )
+                raw = await exchange.fetch_ohlcv(
+                    normalized_symbol,
+                    timeframe=interval,
+                    since=None,
+                    limit=lookback,
+                )
                 # raw is list of [ts, open, high, low, close, volume]
                 for row in raw:
                     ts, open_v, high_v, low_v, close_v, vol = row

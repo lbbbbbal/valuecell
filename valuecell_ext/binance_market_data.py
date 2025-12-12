@@ -232,13 +232,12 @@ class BinanceMarketData:
                 "options": {"defaultType": "future"},
                 "enableRateLimit": True,
             })
-        market_symbol = symbol.replace("USDT", "/USDT")
-        resolved_symbol = f"{market_symbol}:USDT"
         markets = await self.ccxt_client.load_markets()
-        market = markets.get(resolved_symbol) or markets.get(market_symbol)
+        market = self._resolve_ccxt_market(symbol, markets)
         logger.debug("CCXT market resolved {sym} -> {market}", sym=symbol, market=market)
-        if not market or market.get("type") != "future" or market.get("linear") is not True:
+        if not market:
             raise RuntimeError("CCXT market type mismatch")
+        resolved_symbol = market["symbol"]
         ohlcv = await self.ccxt_client.fetch_ohlcv(resolved_symbol, timeframe=interval, since=start, limit=limit, params={})
         candles = []
         for row in ohlcv:
@@ -255,6 +254,18 @@ class BinanceMarketData:
                 )
             )
         return candles
+
+    def _resolve_ccxt_market(self, symbol: str, markets: Dict[str, dict]) -> Optional[dict]:
+        normalized = self.normalize_symbol(symbol)
+        for market in markets.values():
+            if market.get("type") != "future" or market.get("linear") is not True:
+                continue
+            market_symbol = market.get("symbol")
+            if not market_symbol:
+                continue
+            if self.normalize_symbol(market_symbol) == normalized:
+                return market
+        return None
 
     def _record_failure(self, symbol: str, interval: str, layer: str) -> None:
         self.failures.record(symbol, interval, layer)

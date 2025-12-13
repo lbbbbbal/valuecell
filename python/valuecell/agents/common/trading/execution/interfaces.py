@@ -51,3 +51,23 @@ class BaseExecutionGateway(ABC):
         """
 
         raise NotImplementedError
+
+    async def fetch_open_orders(self):
+        """Fetch open orders for reconciliation.
+
+        Implementations should return a list of dictionaries matching CCXT's
+        structure (id, clientOrderId, status, type, side, price, amount,
+        remaining, average, stopPrice, timestamp).
+        """
+
+        raise NotImplementedError
+
+    async def fetch_my_trades(self, since: int | None = None):
+        """Fetch user trades/fills since the provided timestamp."""
+
+        raise NotImplementedError
+
+    async def submit_exit_order(self, plan):
+        """Submit a stop-loss / take-profit order described by ExitOrderPlan."""
+
+        raise NotImplementedError

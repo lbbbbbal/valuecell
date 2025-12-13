@@ -16,11 +16,15 @@ from ..history import (
     BaseHistoryRecorder,
 )
 from ..models import (
+    BrokerFeedback,
     ComposeContext,
     DecisionCycleResult,
     FeatureVector,
+    FillFeedback,
     HistoryRecord,
     MarketType,
+    OpenOrderFeedback,
+    OrderEvent,
     PriceMode,
     StrategyStatus,
     StrategySummary,
@@ -33,6 +37,12 @@ from ..models import (
     TxResult,
     TxStatus,
     UserRequest,
+)
+from ..execution.bracket_manager import (
+    BracketOrderManager,
+    ExitOrderPlan,
+    FillEvent,
+    OpenOrderState,
 )
 from ..portfolio.interfaces import BasePortfolioService
 from ..utils import (
@@ -102,10 +112,14 @@ class DefaultDecisionCoordinator(DecisionCoordinator):
         self._unrealized_pnl: float = 0.0
         self.cycle_index: int = 0
         self._strategy_name = request.trading_config.strategy_name or strategy_id
+        self._last_cycle_ts: int | None = None
+        self._pending_order_events: List[OrderEvent] = []
 
     async def run_once(self) -> DecisionCycleResult:
         timestamp_ms = get_current_timestamp_ms()
         compose_id = generate_uuid("compose")
+
+        broker_feedback = await self._build_broker_feedback(timestamp_ms)
 
         portfolio = self.portfolio_service.get_view()
         # LIVE mode: sync cash from exchange free balance; set buying power to cash
@@ -174,6 +188,7 @@ class DefaultDecisionCoordinator(DecisionCoordinator):
             features=features,
             portfolio=portfolio,
             digest=digest,
+            broker_feedback=broker_feedback,
         )
 
         compose_result = await self._composer.compose(context)
@@ -229,6 +244,11 @@ class DefaultDecisionCoordinator(DecisionCoordinator):
 
         trades = self._create_trades(tx_results, compose_id, timestamp_ms)
         self.portfolio_service.apply_trades(trades, market_features)
+        exit_events = await self._reconcile_exit_orders(
+            compose_id, timestamp_ms, instructions, tx_results
+        )
+        if exit_events:
+            self._pending_order_events.extend(exit_events)
         summary = self.build_summary(timestamp_ms, trades)
 
         history_records = self._create_history_records(
@@ -240,6 +260,7 @@ class DefaultDecisionCoordinator(DecisionCoordinator):
 
         digest = self._digest_builder.build(self._history_recorder.get_records())
         self.cycle_index += 1
+        self._last_cycle_ts = timestamp_ms
 
         portfolio = self.portfolio_service.get_view()
         return DecisionCycleResult(
@@ -670,6 +691,228 @@ class DefaultDecisionCoordinator(DecisionCoordinator):
                 "Failed to close all positions for strategy {}", self.strategy_id
             )
             return []
+
+    async def _build_broker_feedback(self, timestamp_ms: int) -> BrokerFeedback:
+        """Assemble broker feedback from exchange state since the last cycle."""
+
+        fills: List[FillFeedback] = []
+        open_orders_summary: List[OpenOrderFeedback] = []
+        order_events: List[OrderEvent] = list(self._pending_order_events)
+
+        try:
+            raw_open_orders = await self._execution_gateway.fetch_open_orders()
+            for order in raw_open_orders or []:
+                open_orders_summary.append(self._to_open_order_feedback(order))
+        except Exception:
+            logger.warning("Failed to fetch open orders for feedback", exc_info=True)
+
+        try:
+            since = self._last_cycle_ts or None
+            raw_trades = await self._execution_gateway.fetch_my_trades(since=since)
+            for trade in raw_trades or []:
+                fills.append(
+                    FillFeedback(
+                        symbol=str(trade.get("symbol")),
+                        qty=float(trade.get("amount") or 0.0),
+                        price=float(trade.get("price") or 0.0),
+                        side=None,
+                        client_order_id=trade.get("order"),
+                        trade_id=trade.get("id"),
+                    )
+                )
+                order_events.append(
+                    OrderEvent(
+                        order_id=str(trade.get("order") or trade.get("id")),
+                        symbol=str(trade.get("symbol")),
+                        type=str(trade.get("type")) if trade.get("type") else None,
+                        status=str(trade.get("status") or "filled"),
+                        filled_qty=float(trade.get("amount") or 0.0),
+                        avg_price=float(trade.get("price") or 0.0),
+                        ts=int(trade.get("timestamp") or timestamp_ms),
+                        reason=None,
+                    )
+                )
+        except Exception:
+            logger.warning("Failed to fetch recent trades for feedback", exc_info=True)
+
+        self._pending_order_events = []
+        return BrokerFeedback(
+            fills_since_last_cycle=fills,
+            open_orders_summary=open_orders_summary,
+            order_events_since_last_cycle=order_events,
+        )
+
+    def _to_open_order_feedback(self, order: dict) -> OpenOrderFeedback:
+        """Convert raw open order into feedback-friendly summary."""
+
+        info = order.get("info", {}) if isinstance(order, dict) else {}
+        return OpenOrderFeedback(
+            client_order_id=str(order.get("clientOrderId") or order.get("id")),
+            symbol=str(order.get("symbol")),
+            type=order.get("type"),
+            side=TradeSide(order.get("side")) if order.get("side") else None,
+            status=order.get("status"),
+            price=float(order.get("price") or 0.0) if order.get("price") else None,
+            stop_price=float(order.get("stopPrice") or 0.0)
+            if order.get("stopPrice")
+            else None,
+            quantity=float(order.get("amount") or 0.0) if order.get("amount") else None,
+            reduce_only=bool(
+                order.get("reduceOnly")
+                or info.get("reduceOnly")
+                or info.get("reduce_only")
+            ),
+            close_position=bool(info.get("closePosition") or info.get("close_position")),
+            purpose=str(info.get("purpose") or order.get("purpose"))
+            if (info.get("purpose") or order.get("purpose"))
+            else None,
+        )
+
+    async def _reconcile_exit_orders(
+        self,
+        compose_id: str,
+        timestamp_ms: int,
+        instructions: List[TradeInstruction],
+        tx_results: List[TxResult],
+    ) -> List[OrderEvent]:
+        """Create or cancel exit orders based on decision exits and latest fills."""
+
+        exit_specs = {
+            inst.instrument.symbol: inst.exit_orders
+            for inst in instructions
+            if getattr(inst, "exit_orders", None) is not None
+        }
+        if not exit_specs:
+            return []
+
+        try:
+            open_orders_raw = await self._execution_gateway.fetch_open_orders()
+        except Exception:
+            logger.warning("Failed to fetch open orders for exit reconciliation", exc_info=True)
+            open_orders_raw = []
+
+        open_states: List[OpenOrderState] = []
+        for order in open_orders_raw or []:
+            cid = str(order.get("clientOrderId") or order.get("id") or "")
+            side = order.get("side")
+            try:
+                side_enum = TradeSide(side) if side else None
+            except Exception:
+                side_enum = None
+            open_states.append(
+                OpenOrderState(
+                    client_order_id=cid,
+                    symbol=str(order.get("symbol")),
+                    side=side_enum or TradeSide.BUY,
+                    type=order.get("type"),
+                    price=float(order.get("price") or 0.0) if order.get("price") else None,
+                    stop_price=float(order.get("stopPrice") or 0.0)
+                    if order.get("stopPrice")
+                    else None,
+                    quantity=float(order.get("amount") or 0.0)
+                    if order.get("amount")
+                    else None,
+                    reduce_only=bool(order.get("reduceOnly")),
+                    close_position=bool(order.get("closePosition")),
+                    purpose=str(order.get("purpose") or ""),
+                )
+            )
+
+        fills = [
+            FillEvent(
+                symbol=tx.instrument.symbol,
+                qty=tx.filled_qty,
+                price=tx.avg_exec_price or 0.0,
+                client_order_id=tx.instruction_id,
+            )
+            for tx in tx_results
+            if tx.status in (TxStatus.FILLED, TxStatus.PARTIAL)
+        ]
+
+        mgr = BracketOrderManager(strategy_id=self.strategy_id)
+        events: List[OrderEvent] = []
+        portfolio = self.portfolio_service.get_view()
+
+        for symbol, spec in exit_specs.items():
+            position = portfolio.positions.get(symbol)
+            if position is None:
+                continue
+            plan = mgr.build_exit_plan(
+                cycle_ts=timestamp_ms,
+                position=position,
+                decision_exits=spec,
+                open_orders=open_states,
+                fills=fills,
+            )
+            for cancel_id in plan.cancel:
+                try:
+                    await self._execution_gateway.cancel_order(cancel_id, symbol)
+                    events.append(
+                        OrderEvent(
+                            order_id=cancel_id,
+                            symbol=symbol,
+                            type="cancel",
+                            status="canceled",
+                            filled_qty=0.0,
+                            avg_price=None,
+                            ts=timestamp_ms,
+                            reason=None,
+                        )
+                    )
+                except Exception as exc:  # noqa: PERF203
+                    events.append(
+                        OrderEvent(
+                            order_id=cancel_id,
+                            symbol=symbol,
+                            type="cancel",
+                            status="error",
+                            filled_qty=None,
+                            avg_price=None,
+                            ts=timestamp_ms,
+                            reason=str(exc),
+                        )
+                    )
+
+            for create in plan.create:
+                try:
+                    order = await self._execution_gateway.submit_exit_order(create)
+                    events.append(self._build_order_event_from_exit(create, order))
+                except Exception as exc:  # noqa: PERF203
+                    events.append(
+                        OrderEvent(
+                            order_id=create.client_order_id,
+                            symbol=create.symbol,
+                            type=create.type,
+                            status="error",
+                            filled_qty=None,
+                            avg_price=None,
+                            ts=timestamp_ms,
+                            reason=str(exc),
+                        )
+                    )
+
+        return events
+
+    def _build_order_event_from_exit(
+        self, plan: ExitOrderPlan, order: dict | None
+    ) -> OrderEvent:
+        """Convert an exit order submission response into an OrderEvent."""
+
+        order = order or {}
+        return OrderEvent(
+            order_id=str(order.get("id") or plan.client_order_id),
+            symbol=str(order.get("symbol") or plan.symbol),
+            type=plan.type,
+            status=str(order.get("status") or "open"),
+            filled_qty=float(order.get("filled") or 0.0)
+            if order.get("filled") is not None
+            else 0.0,
+            avg_price=float(order.get("average") or order.get("price") or 0.0)
+            if (order.get("average") or order.get("price"))
+            else None,
+            ts=int(order.get("timestamp") or get_current_timestamp_ms()),
+            reason=None,
+        )
 
     async def close(self) -> None:
         """Release resources for the execution gateway if it supports closing."""

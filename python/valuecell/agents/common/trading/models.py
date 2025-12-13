@@ -772,6 +772,12 @@ class TradeInstruction(BaseModel):
     )
     limit_price: Optional[float] = Field(default=None)
     max_slippage_bps: Optional[float] = Field(default=None)
+    exit_orders: Optional["ExitOrdersSpec"] = Field(
+        default=None,
+        description=(
+            "Optional bracket exits (stop-loss/take-profit) to attach after fills"
+        ),
+    )
     meta: Optional[Dict[str, str | float | bool]] = Field(
         default=None, description="Optional metadata for auditing"
     )
@@ -881,6 +887,19 @@ class OrderAttemptFeedback(BaseModel):
     error_msg: Optional[str] = None
 
 
+class OrderEvent(BaseModel):
+    """Compact order lifecycle event for LLM feedback."""
+
+    order_id: str
+    symbol: str
+    type: Optional[str] = None
+    status: Optional[str] = None
+    filled_qty: Optional[float] = None
+    avg_price: Optional[float] = None
+    ts: Optional[int] = None
+    reason: Optional[str] = None
+
+
 class FillFeedback(BaseModel):
     """Compact fill record for downstream context."""
 
@@ -914,6 +933,7 @@ class BrokerFeedback(BaseModel):
     order_attempts: List[OrderAttemptFeedback] = Field(default_factory=list)
     fills_since_last_cycle: List[FillFeedback] = Field(default_factory=list)
     open_orders_summary: List[OpenOrderFeedback] = Field(default_factory=list)
+    order_events_since_last_cycle: List[OrderEvent] = Field(default_factory=list)
 
 
 class ComposeContext(BaseModel):

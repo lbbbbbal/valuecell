@@ -231,6 +231,26 @@ class SimpleMarketDataSource(BaseMarketDataSource):
                 ticker = await exchange.fetch_ticker(sym)
                 snapshot[symbol]["price"] = ticker
 
+                # Ensure we capture best bid/ask for slippage/spread controls
+                bid = ticker.get("bid")
+                ask = ticker.get("ask")
+                if bid is None or ask is None:
+                    try:
+                        orderbook = await exchange.fetch_order_book(sym, limit=5)
+                        top_bid = (orderbook.get("bids") or [[None]])[0][0]
+                        top_ask = (orderbook.get("asks") or [[None]])[0][0]
+                        if bid is None and top_bid is not None:
+                            snapshot[symbol]["price"]["bid"] = float(top_bid)
+                        if ask is None and top_ask is not None:
+                            snapshot[symbol]["price"]["ask"] = float(top_ask)
+                    except Exception:
+                        logger.warning(
+                            "Failed to fetch orderbook for best bid/ask: {} at {}",
+                            symbol,
+                            self._exchange_id,
+                            exc_info=True,
+                        )
+
                 # best-effort: warm other endpoints (open interest / funding)
                 try:
                     oi = await exchange.fetch_open_interest(sym)

@@ -75,12 +75,12 @@ class PaperExecutionGateway(BaseExecutionGateway):
         """No-op close for paper gateway (nothing to cleanup)."""
         return None
 
-    async def fetch_open_orders(self):
+    async def fetch_open_orders(self, symbol: str):
         """Paper trading has no persistent open orders."""
 
         return []
 
-    async def fetch_my_trades(self, since: int | None = None):
+    async def fetch_my_trades(self, symbol: str, since: int | None = None):
         """Paper trading returns synthetic fills captured during execute."""
 
         return []

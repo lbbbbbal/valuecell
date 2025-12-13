@@ -215,6 +215,10 @@ class CCXTExecutionGateway(BaseExecutionGateway):
 
         # Check if exchange supports setting leverage
         if not exchange.has.get("setLeverage"):
+            logger.warning(
+                "Exchange {} does not support setLeverage; using default leverage",
+                self.exchange_id,
+            )
             return
 
         try:
@@ -222,12 +226,23 @@ class CCXTExecutionGateway(BaseExecutionGateway):
             params = {}
             if self.exchange_id == "okx":
                 params["marginMode"] = self.margin_mode  # 'cross' or 'isolated'
-            await exchange.set_leverage(int(leverage), symbol, params)
+            logger.info("Setting leverage {lev}x for {symbol}", lev=leverage, symbol=symbol)
+            result = await exchange.set_leverage(int(leverage), symbol, params)
             self._leverage_cache[symbol] = leverage
+            logger.info(
+                "setLeverage response for {symbol}: {result}",
+                symbol=symbol,
+                result=result,
+            )
         except Exception as e:
-            # Some exchanges don't support leverage on certain symbols
-            # Log but don't fail the trade
-            print(f"Warning: Could not set leverage for {symbol}: {e}")
+            logger.warning(
+                "Could not set leverage {lev}x for {symbol} on {exchange}: {err}",
+                lev=leverage,
+                symbol=symbol,
+                exchange=self.exchange_id,
+                err=str(e),
+                exc_info=True,
+            )
 
     async def _setup_margin_mode(self, symbol: str, exchange: ccxt.Exchange) -> None:
         """Set margin mode for a symbol if needed and supported.
@@ -726,6 +741,52 @@ class CCXTExecutionGateway(BaseExecutionGateway):
 
         return fee_cost
 
+    async def _extract_fee_from_trades(
+        self,
+        exchange: ccxt.Exchange,
+        symbol: str,
+        order_id: str,
+        since: int | None,
+    ) -> float:
+        """Backfill fee from recent trades when order response lacks fee info."""
+
+        if not exchange.has.get("fetchMyTrades"):
+            return 0.0
+
+        try:
+            trades = await exchange.fetch_my_trades(symbol=symbol, since=since)
+        except Exception as exc:
+            logger.warning(
+                "  ⚠️ Could not fetch trades for fee backfill on {symbol}: {err}",
+                symbol=symbol,
+                err=str(exc),
+                exc_info=True,
+            )
+            return 0.0
+
+        fee_cost = 0.0
+        for trade in trades or []:
+            oid = str(trade.get("order") or trade.get("id") or "")
+            if not oid or oid != str(order_id):
+                continue
+
+            fee_info = trade.get("fee") or {}
+            cost = fee_info.get("cost")
+            if cost:
+                fee_cost += abs(float(cost))
+
+            for fee in trade.get("fees") or []:
+                fee_cost += abs(float(fee.get("cost") or 0.0))
+
+        if fee_cost > 0:
+            logger.info(
+                "  💰 Fee backfilled from trades for {symbol}/{order_id}: {fee}",
+                symbol=symbol,
+                order_id=order_id,
+                fee=fee_cost,
+            )
+        return fee_cost
+
     async def execute(
         self,
         instructions: List[TradeInstruction],
@@ -1190,6 +1251,13 @@ class CCXTExecutionGateway(BaseExecutionGateway):
         )
 
         fee_cost = self._extract_fee_from_order(order, symbol, filled_qty, avg_price)
+        if fee_cost == 0.0 and order.get("id"):
+            fee_cost = await self._extract_fee_from_trades(
+                exchange,
+                symbol,
+                str(order.get("id")),
+                order.get("timestamp"),
+            )
 
         # Calculate slippage if applicable
         slippage_bps = None
@@ -1348,24 +1416,25 @@ class CCXTExecutionGateway(BaseExecutionGateway):
         normalized_symbol = self._normalize_symbol(symbol)
         return await exchange.cancel_order(order_id, normalized_symbol)
 
-    async def fetch_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:
-        """Fetch open orders from exchange.
+    async def fetch_open_orders(self, symbol: str) -> List[Dict]:
+        """Fetch open orders from exchange for a given symbol."""
 
-        Args:
-            symbol: Optional symbol to filter orders
+        if not symbol:
+            raise ValueError("symbol is required for fetch_open_orders")
 
-        Returns:
-            List of open order dictionaries
-        """
         exchange = await self._get_exchange()
-        normalized_symbol = self._normalize_symbol(symbol) if symbol else None
+        normalized_symbol = self._normalize_symbol(symbol)
         return await exchange.fetch_open_orders(normalized_symbol)
 
-    async def fetch_my_trades(self, since: int | None = None) -> List[Dict]:
-        """Fetch user trades/fills since the provided timestamp."""
+    async def fetch_my_trades(self, symbol: str, since: int | None = None) -> List[Dict]:
+        """Fetch user trades/fills for a symbol since the provided timestamp."""
+
+        if not symbol:
+            raise ValueError("symbol is required for fetch_my_trades")
 
         exchange = await self._get_exchange()
-        return await exchange.fetch_my_trades(symbol=None, since=since)
+        normalized_symbol = self._normalize_symbol(symbol)
+        return await exchange.fetch_my_trades(symbol=normalized_symbol, since=since)
 
     async def submit_exit_order(self, plan) -> Dict:
         """Submit stop-loss or take-profit orders using CCXT create_order."""

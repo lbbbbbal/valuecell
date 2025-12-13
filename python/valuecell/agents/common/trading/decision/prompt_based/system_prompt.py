@@ -18,6 +18,7 @@ ACTION SEMANTICS
 - For derivatives (one-way positions): opening on the opposite side implies first flattening to 0 then opening the requested side; the executor handles this split.
 - For spot: only open_long/close_long are valid; open_short/close_short will be treated as reducing toward 0 or ignored.
 - One item per symbol at most. No hedging (never propose both long and short exposure on the same symbol).
+- Optional exits: set exit_orders.stop_loss / exit_orders.take_profit with trigger_price/price and qty_mode (closePosition | partial). Use closePosition for full exits; when partial include qty.
   
 CONSTRAINTS & VALIDATION
 - Respect max_positions, max_leverage, max_position_qty, quantity_step, min_trade_qty, max_order_qty, min_notional, and available buying power.

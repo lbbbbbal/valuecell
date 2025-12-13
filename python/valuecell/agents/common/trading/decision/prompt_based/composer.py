@@ -191,6 +191,11 @@ class LlmComposer(BaseComposer):
         features = group_features(context.features)
         market = extract_market_section(features.get("market_snapshot", []))
         signals = self._serialize_signals(context)
+        broker_feedback = (
+            context.broker_feedback.model_dump(mode="json", exclude_none=True)
+            if context.broker_feedback
+            else None
+        )
 
         # Portfolio positions
         positions = [
@@ -220,6 +225,7 @@ class LlmComposer(BaseComposer):
                 "positions": positions,
                 "constraints": constraints,
                 "signals": signals,
+                "broker_feedback": broker_feedback,
             }
         )
 

@@ -597,6 +597,79 @@ def derive_side_from_action(
     return None
 
 
+class ExitQtyMode(str, Enum):
+    """Sizing directive for exit orders."""
+
+    CLOSE_POSITION = "closePosition"
+    PARTIAL = "partial"
+
+
+class StopLossSpec(BaseModel):
+    """Stop-loss exit definition for the planner."""
+
+    type: str = Field(
+        default="STOP_MARKET", description="Binance-compatible order type"
+    )
+    trigger_price: float = Field(
+        ..., description="Stop trigger price for the stop-market order"
+    )
+    qty_mode: ExitQtyMode = Field(
+        default=ExitQtyMode.CLOSE_POSITION,
+        description="How to size the order: full close or partial",
+    )
+    qty: Optional[float] = Field(
+        default=None,
+        description="Quantity to exit when qty_mode=partial; ignored when closePosition",
+    )
+
+    @model_validator(mode="after")
+    def _validate_qty(self):
+        if self.qty_mode == ExitQtyMode.PARTIAL and (self.qty is None or self.qty <= 0):
+            raise ValueError("qty must be provided for partial stop loss")
+        return self
+
+
+class TakeProfitSpec(BaseModel):
+    """Take-profit exit definition for the planner."""
+
+    type: str = Field(
+        default="TAKE_PROFIT_MARKET",
+        description="Binance-compatible order type (TP market or limit)",
+    )
+    trigger_price: Optional[float] = Field(
+        default=None,
+        description="Trigger price for TP stop orders (ignored for plain LIMIT)",
+    )
+    price: Optional[float] = Field(
+        default=None, description="Limit price for TP limit orders"
+    )
+    qty_mode: ExitQtyMode = Field(
+        default=ExitQtyMode.CLOSE_POSITION,
+        description="How to size the order: full close or partial",
+    )
+    qty: Optional[float] = Field(
+        default=None,
+        description="Quantity to exit when qty_mode=partial; ignored when closePosition",
+    )
+
+    @model_validator(mode="after")
+    def _validate_qty(self):
+        if self.qty_mode == ExitQtyMode.PARTIAL and (self.qty is None or self.qty <= 0):
+            raise ValueError("qty must be provided for partial take profit")
+        if self.type == "LIMIT" and self.price is None:
+            raise ValueError("price required for LIMIT take profit")
+        if self.type != "LIMIT" and self.trigger_price is None:
+            raise ValueError("trigger_price required for stop/market take profit")
+        return self
+
+
+class ExitOrdersSpec(BaseModel):
+    """Bracket exit specification attached to a decision item."""
+
+    stop_loss: Optional[StopLossSpec] = None
+    take_profit: Optional[TakeProfitSpec] = None
+
+
 class TradeDecisionItem(BaseModel):
     """Trade plan item. Interprets target_qty as operation size (magnitude).
 
@@ -618,8 +691,19 @@ class TradeDecisionItem(BaseModel):
     confidence: Optional[float] = Field(
         default=None, description="Optional confidence score [0,1]"
     )
+    exit_orders: Optional["ExitOrdersSpec"] = Field(
+        default=None,
+        description="Optional bracket exits (TP/SL) to manage the resulting position",
+    )
     rationale: Optional[str] = Field(
         default=None, description="Optional natural language rationale"
+    )
+    meta: Optional[Dict[str, float | str]] = Field(
+        default=None,
+        description=(
+            "Opaque metadata produced by the planner (compose_id, regime, "
+            "estimated_notional, estimated_fee, etc.)."
+        ),
     )
 
     # TODO: Remove this validator when the model supports InstrumentRef.
@@ -786,6 +870,52 @@ class PortfolioValueSeries(BaseModel):
 MarketSnapShotType = Dict[str, Dict[str, Any]]
 
 
+class OrderAttemptFeedback(BaseModel):
+    """Captures an order attempt and its broker response."""
+
+    client_order_id: str
+    symbol: str
+    purpose: str
+    status: str
+    error_code: Optional[str] = None
+    error_msg: Optional[str] = None
+
+
+class FillFeedback(BaseModel):
+    """Compact fill record for downstream context."""
+
+    symbol: str
+    qty: float
+    price: float
+    side: Optional[TradeSide] = None
+    client_order_id: Optional[str] = None
+    trade_id: Optional[str] = None
+
+
+class OpenOrderFeedback(BaseModel):
+    """Open order summary used to show the LLM active exits and entries."""
+
+    client_order_id: str
+    symbol: str
+    type: Optional[str] = None
+    side: Optional[TradeSide] = None
+    status: Optional[str] = None
+    price: Optional[float] = None
+    stop_price: Optional[float] = None
+    quantity: Optional[float] = None
+    reduce_only: bool = False
+    close_position: bool = False
+    purpose: Optional[str] = None
+
+
+class BrokerFeedback(BaseModel):
+    """Feedback block fed into the next compose cycle."""
+
+    order_attempts: List[OrderAttemptFeedback] = Field(default_factory=list)
+    fills_since_last_cycle: List[FillFeedback] = Field(default_factory=list)
+    open_orders_summary: List[OpenOrderFeedback] = Field(default_factory=list)
+
+
 class ComposeContext(BaseModel):
     """Context assembled for the composer."""
 
@@ -816,6 +946,12 @@ class ComposeContext(BaseModel):
     )
     signal_mix: Optional[SignalMix] = Field(
         default=None, description="Final blended signal after weighting"
+    )
+    broker_feedback: Optional[BrokerFeedback] = Field(
+        default=None,
+        description=(
+            "Execution-layer feedback: order attempts, fills, and open orders"
+        ),
     )
 
 

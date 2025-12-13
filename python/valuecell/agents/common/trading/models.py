@@ -723,6 +723,15 @@ class TradeDecisionItem(BaseModel):
             values["instrument"] = {"symbol": instrument}
         return values
 
+    @model_validator(mode="after")
+    def _coerce_zero_qty_to_noop(self):
+        try:
+            if abs(float(self.target_qty)) <= 1e-12 and self.action != TradeDecisionAction.NOOP:
+                object.__setattr__(self, "action", TradeDecisionAction.NOOP)
+        except Exception:
+            return self
+        return self
+
 
 class TradePlanProposal(BaseModel):
     """Structured output before rule normalization."""

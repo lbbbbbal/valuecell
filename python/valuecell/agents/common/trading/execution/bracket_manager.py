@@ -26,6 +26,7 @@ class OpenOrderState:
     price: Optional[float] = None
     stop_price: Optional[float] = None
     quantity: Optional[float] = None
+    position_qty: Optional[float] = None
     reduce_only: bool = False
     close_position: bool = False
     purpose: Optional[str] = None

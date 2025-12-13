@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import replace
 from typing import List, Optional
 
 from loguru import logger
@@ -40,6 +41,7 @@ from ..models import (
 )
 from ..execution.bracket_manager import (
     BracketOrderManager,
+    ExitReconcilePlan,
     ExitOrderPlan,
     FillEvent,
     OpenOrderState,
@@ -699,41 +701,51 @@ class DefaultDecisionCoordinator(DecisionCoordinator):
         open_orders_summary: List[OpenOrderFeedback] = []
         order_events: List[OrderEvent] = list(self._pending_order_events)
 
-        try:
-            raw_open_orders = await self._execution_gateway.fetch_open_orders()
-            for order in raw_open_orders or []:
-                open_orders_summary.append(self._to_open_order_feedback(order))
-        except Exception:
-            logger.warning("Failed to fetch open orders for feedback", exc_info=True)
+        for symbol in self._symbols:
+            try:
+                raw_open_orders = await self._execution_gateway.fetch_open_orders(symbol)
+                for order in raw_open_orders or []:
+                    open_orders_summary.append(self._to_open_order_feedback(order))
+            except Exception:
+                logger.warning(
+                    "Failed to fetch open orders for feedback on {}", symbol, exc_info=True
+                )
 
-        try:
-            since = self._last_cycle_ts or None
-            raw_trades = await self._execution_gateway.fetch_my_trades(since=since)
-            for trade in raw_trades or []:
-                fills.append(
-                    FillFeedback(
-                        symbol=str(trade.get("symbol")),
-                        qty=float(trade.get("amount") or 0.0),
-                        price=float(trade.get("price") or 0.0),
-                        side=None,
-                        client_order_id=trade.get("order"),
-                        trade_id=trade.get("id"),
-                    )
+        since = self._last_cycle_ts or None
+        for symbol in self._symbols:
+            try:
+                raw_trades = await self._execution_gateway.fetch_my_trades(
+                    symbol, since=since
                 )
-                order_events.append(
-                    OrderEvent(
-                        order_id=str(trade.get("order") or trade.get("id")),
-                        symbol=str(trade.get("symbol")),
-                        type=str(trade.get("type")) if trade.get("type") else None,
-                        status=str(trade.get("status") or "filled"),
-                        filled_qty=float(trade.get("amount") or 0.0),
-                        avg_price=float(trade.get("price") or 0.0),
-                        ts=int(trade.get("timestamp") or timestamp_ms),
-                        reason=None,
+                for trade in raw_trades or []:
+                    fills.append(
+                        FillFeedback(
+                            symbol=str(trade.get("symbol")),
+                            qty=float(trade.get("amount") or 0.0),
+                            price=float(trade.get("price") or 0.0),
+                            side=None,
+                            client_order_id=trade.get("order"),
+                            trade_id=trade.get("id"),
+                        )
                     )
+                    order_events.append(
+                        OrderEvent(
+                            order_id=str(trade.get("order") or trade.get("id")),
+                            symbol=str(trade.get("symbol")),
+                            type=str(trade.get("type"))
+                            if trade.get("type")
+                            else None,
+                            status=str(trade.get("status") or "filled"),
+                            filled_qty=float(trade.get("amount") or 0.0),
+                            avg_price=float(trade.get("price") or 0.0),
+                            ts=int(trade.get("timestamp") or timestamp_ms),
+                            reason=None,
+                        )
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to fetch recent trades for feedback on {}", symbol, exc_info=True
                 )
-        except Exception:
-            logger.warning("Failed to fetch recent trades for feedback", exc_info=True)
 
         self._pending_order_events = []
         return BrokerFeedback(
@@ -785,38 +797,45 @@ class DefaultDecisionCoordinator(DecisionCoordinator):
         if not exit_specs:
             return []
 
-        try:
-            open_orders_raw = await self._execution_gateway.fetch_open_orders()
-        except Exception:
-            logger.warning("Failed to fetch open orders for exit reconciliation", exc_info=True)
-            open_orders_raw = []
-
         open_states: List[OpenOrderState] = []
-        for order in open_orders_raw or []:
-            cid = str(order.get("clientOrderId") or order.get("id") or "")
-            side = order.get("side")
+        fetch_failures: set[str] = set()
+        for symbol in exit_specs:
             try:
-                side_enum = TradeSide(side) if side else None
+                open_orders_raw = await self._execution_gateway.fetch_open_orders(symbol)
             except Exception:
-                side_enum = None
-            open_states.append(
-                OpenOrderState(
-                    client_order_id=cid,
-                    symbol=str(order.get("symbol")),
-                    side=side_enum or TradeSide.BUY,
-                    type=order.get("type"),
-                    price=float(order.get("price") or 0.0) if order.get("price") else None,
-                    stop_price=float(order.get("stopPrice") or 0.0)
-                    if order.get("stopPrice")
-                    else None,
-                    quantity=float(order.get("amount") or 0.0)
-                    if order.get("amount")
-                    else None,
-                    reduce_only=bool(order.get("reduceOnly")),
-                    close_position=bool(order.get("closePosition")),
-                    purpose=str(order.get("purpose") or ""),
+                logger.warning(
+                    "Failed to fetch open orders for exit reconciliation on {}",
+                    symbol,
+                    exc_info=True,
                 )
-            )
+                fetch_failures.add(symbol)
+                open_orders_raw = []
+
+            for order in open_orders_raw or []:
+                cid = str(order.get("clientOrderId") or order.get("id") or "")
+                side = order.get("side")
+                try:
+                    side_enum = TradeSide(side) if side else None
+                except Exception:
+                    side_enum = None
+                open_states.append(
+                    OpenOrderState(
+                        client_order_id=cid,
+                        symbol=str(order.get("symbol")),
+                        side=side_enum or TradeSide.BUY,
+                        type=order.get("type"),
+                        price=float(order.get("price") or 0.0) if order.get("price") else None,
+                        stop_price=float(order.get("stopPrice") or 0.0)
+                        if order.get("stopPrice")
+                        else None,
+                        quantity=float(order.get("amount") or 0.0)
+                        if order.get("amount")
+                        else None,
+                        reduce_only=bool(order.get("reduceOnly")),
+                        close_position=bool(order.get("closePosition")),
+                        purpose=str(order.get("purpose") or ""),
+                    )
+                )
 
         fills = [
             FillEvent(
@@ -844,6 +863,17 @@ class DefaultDecisionCoordinator(DecisionCoordinator):
                 open_orders=open_states,
                 fills=fills,
             )
+            if symbol in fetch_failures:
+                plan = ExitReconcilePlan(
+                    create=[
+                        replace(
+                            item,
+                            client_order_id=f"emergency:{item.client_order_id}",
+                        )
+                        for item in plan.create
+                    ],
+                    cancel=[],
+                )
             for cancel_id in plan.cancel:
                 try:
                     await self._execution_gateway.cancel_order(cancel_id, symbol)

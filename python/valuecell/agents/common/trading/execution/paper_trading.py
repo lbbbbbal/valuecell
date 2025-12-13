@@ -74,3 +74,28 @@ class PaperExecutionGateway(BaseExecutionGateway):
     async def close(self) -> None:
         """No-op close for paper gateway (nothing to cleanup)."""
         return None
+
+    async def fetch_open_orders(self):
+        """Paper trading has no persistent open orders."""
+
+        return []
+
+    async def fetch_my_trades(self, since: int | None = None):
+        """Paper trading returns synthetic fills captured during execute."""
+
+        return []
+
+    async def submit_exit_order(self, plan):
+        """Simulate exit order submission by returning a minimal echo object."""
+
+        return {
+            "id": plan.client_order_id,
+            "clientOrderId": plan.client_order_id,
+            "symbol": plan.symbol,
+            "type": plan.type,
+            "status": "open",
+            "amount": plan.quantity or plan.position_qty,
+            "stopPrice": plan.stop_price,
+            "price": plan.price,
+            "timestamp": None,
+        }

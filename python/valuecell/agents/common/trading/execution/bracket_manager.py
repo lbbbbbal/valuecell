@@ -55,6 +55,7 @@ class ExitOrderPlan:
     reduce_only: bool
     close_position: bool
     purpose: str
+    position_qty: float
 
 
 @dataclass
@@ -175,6 +176,7 @@ class BracketOrderManager:
                 reduce_only=True,
                 close_position=close_position,
                 purpose=purpose,
+                position_qty=position_qty,
             )
         ]
 

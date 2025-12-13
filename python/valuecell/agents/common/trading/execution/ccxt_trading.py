@@ -1361,6 +1361,36 @@ class CCXTExecutionGateway(BaseExecutionGateway):
         normalized_symbol = self._normalize_symbol(symbol) if symbol else None
         return await exchange.fetch_open_orders(normalized_symbol)
 
+    async def fetch_my_trades(self, since: int | None = None) -> List[Dict]:
+        """Fetch user trades/fills since the provided timestamp."""
+
+        exchange = await self._get_exchange()
+        return await exchange.fetch_my_trades(symbol=None, since=since)
+
+    async def submit_exit_order(self, plan) -> Dict:
+        """Submit stop-loss or take-profit orders using CCXT create_order."""
+
+        exchange = await self._get_exchange()
+        symbol = self._normalize_symbol(plan.symbol)
+        params = {
+            "reduceOnly": plan.reduce_only,
+            "closePosition": plan.close_position,
+            "stopPrice": plan.stop_price,
+            "clientOrderId": self._sanitize_client_order_id(plan.client_order_id),
+            "positionSide": "long" if plan.side is TradeSide.SELL else "short",
+        }
+        amount = plan.quantity or plan.position_qty
+        order_type = plan.type.lower()
+        price = plan.price
+        return await exchange.create_order(
+            symbol=symbol,
+            type=order_type,
+            side=plan.side.value.lower(),
+            amount=amount,
+            price=price,
+            params=params,
+        )
+
     def __repr__(self) -> str:
         mode = "testnet" if self.testnet else "live"
         return (

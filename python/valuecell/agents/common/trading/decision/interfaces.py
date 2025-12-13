@@ -463,6 +463,7 @@ class BaseComposer(ABC):
             quantity=quantity,
             leverage=final_leverage,
             max_slippage_bps=self._default_slippage_bps,
+            exit_orders=getattr(item, "exit_orders", None),
             meta=meta,
         )
         logger.debug(

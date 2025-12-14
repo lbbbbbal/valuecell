@@ -17,6 +17,8 @@ RISK_FREE_RATE = 0.03
 
 # Number of seconds per year (365 days * 24 hours * 3600 seconds/hour)
 SECONDS_PER_YEAR = 365 * 24 * 3600
+MIN_SHARPE_SAMPLES = 5
+MIN_SHARPE_SPAN_SECONDS = 300
 
 
 class RollingDigestBuilder(BaseDigestBuilder):
@@ -199,6 +201,10 @@ class RollingDigestBuilder(BaseDigestBuilder):
                         pass
 
         if len(equities) < 2 or len(timestamps) < 2:
+            return None
+
+        total_span_seconds = (timestamps[-1] - timestamps[0]) / 1000.0
+        if len(equities) < MIN_SHARPE_SAMPLES or total_span_seconds < MIN_SHARPE_SPAN_SECONDS:
             return None
 
         # Calculate average period in seconds

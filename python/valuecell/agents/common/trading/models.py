@@ -263,6 +263,11 @@ class TradingConfig(BaseModel):
         description="Notional cap factor used by the composer to limit per-symbol exposure (e.g., 1.5)",
         gt=0,
     )
+    min_holding_seconds: int = Field(
+        default=120,
+        description="Minimum holding window before allowing position reductions/closures",
+        ge=0,
+    )
     # Grid parameters are model-decided at runtime; no user-configurable grid_* fields.
 
     @field_validator("symbols")

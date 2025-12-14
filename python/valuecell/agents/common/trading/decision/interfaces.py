@@ -10,6 +10,7 @@ from ..models import (
     ComposeContext,
     ComposeResult,
     Constraints,
+    ExitOrdersSpec,
     MarketType,
     TradeDecisionAction,
     TradeInstruction,
@@ -50,6 +51,38 @@ class BaseComposer(ABC):
         a validated ComposeResult containing instructions and optional rationale.
         """
         raise NotImplementedError
+
+    def _normalize_exit_orders(self, exits: ExitOrdersSpec | dict | None) -> ExitOrdersSpec | None:
+        """Validate and coerce exit order specs from composer output."""
+
+        if exits is None:
+            return None
+        try:
+            return ExitOrdersSpec.model_validate(exits)
+        except Exception as exc:  # noqa: PERF203
+            logger.warning("Dropping invalid exit_orders spec: {}", exc)
+            return None
+
+    def _under_min_holding_window(self, context: ComposeContext, symbol: str) -> bool:
+        """Check whether the symbol's position is within the configured hold window."""
+
+        try:
+            min_hold_ms = int(self._request.trading_config.min_holding_seconds * 1000)
+        except Exception:
+            min_hold_ms = 0
+        if min_hold_ms <= 0:
+            return False
+
+        position = context.portfolio.positions.get(symbol)
+        entry_ts = getattr(position, "entry_ts", None) if position else None
+        if entry_ts is None:
+            return False
+
+        try:
+            age_ms = max(0, int(context.ts) - int(entry_ts))
+        except Exception:
+            return False
+        return age_ms < min_hold_ms
 
     def _init_buying_power_context(
         self,
@@ -304,6 +337,9 @@ class BaseComposer(ABC):
         for idx, item in enumerate(plan.items):
             symbol = item.instrument.symbol
             current_qty = projected_positions.get(symbol, 0.0)
+            item.exit_orders = self._normalize_exit_orders(
+                getattr(item, "exit_orders", None)
+            )
 
             # determine the intended target quantity (clamped by max_position_qty)
             target_qty = self._resolve_target_quantity(
@@ -344,6 +380,21 @@ class BaseComposer(ABC):
                         symbol,
                         active_positions,
                         max_positions,
+                    )
+                    continue
+
+                reducing_or_flipping = (
+                    abs(sub_target) < abs(local_current)
+                    or local_current * sub_target < 0
+                )
+                if (
+                    abs(local_current) > self._quantity_precision
+                    and reducing_or_flipping
+                    and self._under_min_holding_window(context, symbol)
+                ):
+                    logger.info(
+                        "Skipping reduce/flip for {} due to min_holding_seconds window",
+                        symbol,
                     )
                     continue
 
@@ -411,6 +462,7 @@ class BaseComposer(ABC):
                     final_leverage,
                     local_current,
                     sub_target,
+                    price_map,
                 )
                 instructions.append(instr)
 
@@ -430,6 +482,7 @@ class BaseComposer(ABC):
         final_leverage: float,
         current_qty: float,
         target_qty: float,
+        price_map: Optional[Dict[str, float]],
     ) -> TradeInstruction:
         """Create a normalized TradeInstruction with metadata."""
         final_target = current_qty + (quantity if side is TradeSide.BUY else -quantity)
@@ -443,6 +496,20 @@ class BaseComposer(ABC):
             meta["confidence"] = item.confidence
         if item.rationale:
             meta["rationale"] = item.rationale
+
+        price = None
+        try:
+            price = float((price_map or {}).get(symbol, 0.0) or 0.0)
+        except Exception:
+            price = None
+        if price and price > 0:
+            estimated_notional = abs(quantity) * price
+            meta["estimated_notional"] = estimated_notional
+            try:
+                fee_bps = float(self._request.exchange_config.fee_bps)
+            except Exception:
+                fee_bps = 0.0
+            meta["estimated_fee"] = estimated_notional * (fee_bps / 10_000.0)
 
         # For derivatives/perpetual markets, mark reduceOnly when instruction reduces absolute exposure to avoid accidental reverse opens
         # Note: Exchange-specific parameter name normalization (e.g., reduceOnly vs reduce_only) is handled by the execution gateway
